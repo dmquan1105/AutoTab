@@ -1,0 +1,5 @@
+username,email,password,fullName,dateOfBirth,address,avatar,role,isLocked,isEmailVerified
+manager01,manager01@email.com,test#123,Nguyen Van A,1/1/1995,Hanoi,,manager,FALSE,FALSE
+user01,user01@email.com,test#123,Nguyen Van B,1/1/1995,Hanoi,,volunteer,FALSE,FALSE
+user02,user02@email.com,test#123,Nguyen Van C,1/1/1995,HCM,,volunteer,FALSE,FALSE
+user03,user03@email.com,test#123,Nguyen Van D,1/1/1995,HCM,,volunteer,FALSE,FALSE

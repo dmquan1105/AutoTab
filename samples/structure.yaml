@@ -1,0 +1,73 @@
+table1:
+  name: People Nested Headers
+  description: Table containing person identifiers, name components, date fields, and scores.
+  headers:
+    - id: "no"
+      label: "No"
+      description: Sequential row number or person identifier.
+      orientation: column
+      header_range: A1:A2
+      data_range: A3:A22
+      sub_headers: []
+
+    - id: name
+      label: Name
+      description: A group of columns representing the person's full name.
+      orientation: column_group
+      header_range: B1:D1
+      data_range: B3:D22
+      sub_headers:
+        - id: first_name
+          label: First
+          description: Person's first name.
+          orientation: column
+          header_range: B2
+          data_range: B3:B22
+          sub_headers: []
+
+        - id: middle_name
+          label: Middle
+          description: Person's middle name.
+          orientation: column
+          header_range: C2
+          data_range: C3:C22
+          sub_headers: []
+
+        - id: last_name
+          label: Last
+          description: Person's last name.
+          orientation: column
+          header_range: D2
+          data_range: D3:D22
+          sub_headers: []
+
+    - id: date_of
+      label: Date of
+      description: A group of date fields for each person.
+      orientation: column_group
+      header_range: E1:F1
+      data_range: E3:F22
+      sub_headers:
+        - id: birth_date
+          label: Birth
+          description: Person's date of birth.
+          orientation: column
+          header_range: E2
+          data_range: E3:E22
+          sub_headers: []
+
+        - id: admission_date
+          label: Admission
+          description: Person's admission date.
+          orientation: column
+          header_range: F2
+          data_range: F3:F22
+          sub_headers: []
+
+    - id: score
+      label: Score
+      description: Numeric score assigned to each person.
+      orientation: column
+      header_range: G1:G2
+      data_range: G3:G22
+      sub_headers: []

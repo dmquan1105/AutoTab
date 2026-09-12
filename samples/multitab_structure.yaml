@@ -1,0 +1,122 @@
+table1:
+  id: table1
+  name: Báo cáo Doanh thu Đối tác
+  description: Bảng tổng hợp số liệu doanh thu phân theo Khu vực và các tháng trong Quý 1.
+  sheet: Data_Synthesis
+
+  headers:
+    - id: region_col
+      label: Khu vực
+      description: Tên khu vực địa lý của đối tác.
+      orientation: column
+      header_range: A3:A4
+      data_range: A5:A7
+      sub_headers: []
+
+    - id: revenue_q1_group
+      label: Doanh thu Q1
+      description: Nhóm các cột doanh thu thành phần trong Quý 1.
+      orientation: column_group
+      header_range: B3:D3
+      data_range: B5:D7
+      sub_headers:
+        - id: month_1
+          label: Tháng 1
+          description: Doanh thu chi tiết của Tháng 1.
+          orientation: column
+          header_range: B4
+          data_range: B5:B7
+          sub_headers: []
+
+        - id: month_2
+          label: Tháng 2
+          description: Doanh thu chi tiết của Tháng 2.
+          orientation: column
+          header_range: C4
+          data_range: C5:C7
+          sub_headers: []
+
+        - id: month_3
+          label: Tháng 3
+          description: Doanh thu chi tiết của Tháng 3.
+          orientation: column
+          header_range: D4
+          data_range: D5:D7
+          sub_headers: []
+
+table2:
+  id: table2
+  name: Thông tin Nhân sự và Lương
+  description: Bảng tính toán chi tiết lương và thưởng của nhân viên dựa trên KPI.
+  sheet: Data_Synthesis
+
+  headers:
+    - id: emp_id
+      label: ID Nhân sự
+      description: Mã định danh duy nhất của mỗi nhân sự.
+      orientation: column
+      header_range: A10
+      data_range: A11:A13
+      sub_headers: []
+
+    - id: emp_name
+      label: Họ và tên
+      description: Tên đầy đủ của nhân sự.
+      orientation: column
+      header_range: B10
+      data_range: B11:B13
+      sub_headers: []
+
+    - id: measure_value
+      label: Lương cơ bản
+      description: Numeric measure used in calculations.
+      orientation: column
+      header_range: C10
+      data_range: C11:C13
+      sub_headers: []
+
+    - id: kpi_factor
+      label: Hệ số KPI
+      description: Hệ số đánh giá hiệu suất công việc.
+      orientation: column
+      header_range: D10
+      data_range: D11:D13
+      sub_headers: []
+
+    - id: calculated_value
+      label: Thành tiền
+      description: Value calculated from one or more input columns.
+      orientation: column
+      header_range: E10
+      data_range: E11:E13
+      sub_headers: []
+
+    - id: bonus_value
+      label: Thưởng thêm
+      description: Giá trị thưởng phát sinh riêng biệt của cá nhân.
+      orientation: column
+      header_range: F10
+      data_range: F11:F13
+      sub_headers: []
+
+relations:
+  normal_formulas:
+    - id: rel_salary_calc
+      expression: "RC[-2]*RC[-1]"
+      description: "Thành tiền = Lương cơ bản * Hệ số KPI"
+      range: "E11:E13"
+      pattern: "RC[-2]*RC[-1]"
+      agg_function: ""
+      formula_example: "=C11*D11"
+
+  aggregate_formulas: []
+  cell_formulas:
+    - id: cell_bonus_emp01
+      expression: "E11*0.1"
+      description: "Thưởng đặc biệt bằng 10% Thành tiền dành riêng cho dòng đầu tiên"
+      range: "F11"
+      pattern: ""
+      agg_function: ""
+      formula_example: "=E11*0.1"
+
+  invalid_formulas: []

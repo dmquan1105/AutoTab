@@ -1,0 +1,68 @@
+table1:
+  normal_formulas:
+  - id: rel_repeat_row_sum_f_1
+    expression: row_total = SUM(C2:E2)
+    description: Repeated row-wise SUM formula. Each row calculates a value from a
+      range of cells in the same row.
+    range: F2:F51
+    pattern: F{row} = SUM(C{row}:E{row})
+    agg_function: SUM
+    formula_example:
+      cell: F2
+      raw: =SUM(C2:E2)
+  - id: rel_repeat_row_arithmetic_g_2
+    expression: adjusted_quantity = row_total * $K$2
+    description: Repeated row-wise arithmetic formula using an absolute reference.
+    range: G2:G51
+    pattern: G{row} = F{row} * $K$2
+    agg_function: null
+    formula_example:
+      cell: G2
+      raw: =F2*$K$2
+  - id: rel_repeat_row_formula_h_3
+    expression: status = IF(adjusted_quantity > $K$3, 'NG', 'OK')
+    description: Repeated row-wise formula.
+    range: H2:H51
+    pattern: H{row} = IF(G{row} > $K$3, 'NG', 'OK')
+    agg_function: null
+    formula_example:
+      cell: H2
+      raw: =IF(G2>$K$3,"NG","OK")
+  aggregate_formulas:
+  - id: rel_aggregate_sum_1
+    expression: total_row_total = SUM(row_total)
+    description: Aggregate SUM formula in cell F52 over a column or range.
+    formula:
+      cell: F52
+      raw: =SUM(F2:F51)
+  - id: rel_aggregate_average_2
+    expression: average_adjusted_quantity = AVERAGE(adjusted_quantity)
+    description: Aggregate AVERAGE formula in cell G52 over a column or range.
+    formula:
+      cell: G52
+      raw: =AVERAGE(G2:G51)
+  cell_formulas:
+  - id: rel_single_cell_formula_1
+    expression: K4 = IF(row_total > $K$3, 'NG', 'OK')
+    description: Standalone formula used only in one specific cell in cell K4.
+    formula:
+      cell: K4
+      raw: =IF(F52>$K$3,"NG","OK")
+  - id: rel_single_cell_formula_2
+    expression: summary_status = COUNTIF(status, 'NG')
+    description: Standalone formula used only in one specific cell in cell H52.
+    formula:
+      cell: H52
+      raw: =COUNTIF(H2:H51,"NG")
+  invalid_formulas:
+  - id: rel_invalid_ref_1
+    expression: null
+    description: 'Formula contains error(s): broken_reference (Original referenced
+      cell or range is lost.).'
+    formula:
+      cell: K5
+      raw: =#REF!+F10
+    errors:
+    - type: broken_reference
+      token: '#REF!'
+      message: Original referenced cell or range is lost.

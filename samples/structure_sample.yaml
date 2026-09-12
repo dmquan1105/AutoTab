@@ -1,0 +1,61 @@
+table1:
+  name: Relations Test Table
+  description: Single-table fixture for testing formula relation extraction.
+  type: relational_table
+  headers:
+    - id: area
+      label: Khu vực
+      description: Area or region category.
+      orientation: column
+      header_range: A1
+      data_range: A2:A51
+      sub_headers: []
+    - id: gender
+      label: Giới tính
+      description: Gender category.
+      orientation: column
+      header_range: B1
+      data_range: B2:B51
+      sub_headers: []
+    - id: value_1
+      label: Value 1
+      description: First numeric input value.
+      orientation: column
+      header_range: C1
+      data_range: C2:C51
+      sub_headers: []
+    - id: value_2
+      label: Value 2
+      description: Second numeric input value.
+      orientation: column
+      header_range: D1
+      data_range: D2:D51
+      sub_headers: []
+    - id: value_3
+      label: Value 3
+      description: Third numeric input value.
+      orientation: column
+      header_range: E1
+      data_range: E2:E51
+      sub_headers: []
+    - id: row_total
+      label: Tổng dòng
+      description: Row-wise total calculated from Value 1, Value 2, and Value 3.
+      orientation: column
+      header_range: F1
+      data_range: F2:F51
+      sub_headers: []
+    - id: adjusted_quantity
+      label: Số lượng sau điều chỉnh
+      description: Adjusted quantity calculated from row_total and the adjustment rate.
+      orientation: column
+      header_range: G1
+      data_range: G2:G51
+      sub_headers: []
+    - id: status
+      label: Trạng thái
+      description: Status derived from adjusted_quantity and the NG threshold.
+      orientation: column
+      header_range: H1
+      data_range: H2:H51
+      sub_headers: []
