@@ -1,0 +1,60 @@
+project:
+  name: autotab
+  python_version: "3.11"
+
+models:
+  llm:
+    profile: default_llm
+    model: Qwen/Qwen3.6-35B-A3B-FP8
+    base_url: http://localhost:8010/v1
+    temperature: 0
+    max_tokens: 4000
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+  vlm:
+    profile: default_vlm
+    model: Qwen/Qwen3.6-35B-A3B-FP8
+    base_url: http://localhost:8010/v1
+    temperature: 0
+    max_tokens: 4000
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+  embedding:
+    profile: default_embedding
+    model: Qwen/Qwen3-Embedding-4B
+    base_url: http://localhost:8001/v1
+
+exploration:
+  similarity_threshold: 0.72
+  max_cells_per_keyword: 8
+  max_concurrent_findings: 8
+  window_size: 9
+  send_query_to_vlm: false
+  include_hidden_sheets: false
+  uncertain_evidence: drop
+
+retrieval:
+  lexical_weight: 0.45
+  semantic_weight: 0.55
+  allow_lexical_only_fallback: true
+
+runtime:
+  artifact_root: outputs
+  request_timeout_seconds: 60
+  max_retries: 1
+  max_input_file_mb: 100
+
+rendering:
+  backend: libreoffice
+  libreoffice_path: null
+  timeout_seconds: 60
+  image_resolution: 600
+  show_coordinates: true
+  min_cell_width: 10
+  max_cell_width: 50
+  cell_width_padding: 3
+  max_image_dimension: 8192
+  max_image_pixels: 33554432
+  trim_padding: 6

@@ -1,0 +1,1 @@
+Compare the adjusted quantities for each region and gender, identify the rows that exceed the NG threshold, and explain how the adjustment rate and overall status relate to those results.
