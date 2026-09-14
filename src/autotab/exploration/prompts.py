@@ -24,7 +24,18 @@ def viewport_description_prompt(
 ) -> str:
     """Build the VLM prompt for a grounded viewport description."""
     return (
-        "Return JSON only with one description field. Describe the keyword in the context "
-        "of the viewport, including relations to other data and notable details. "
-        f"Keyword: {keyword}."
+        "You are examining a rendered viewport from an Excel worksheet. Return JSON only with one string field named "
+        '"description". Describe only what is visible in the worksheet viewport and do not '
+        "add outside knowledge or infer content that is not shown. "
+        f'The target keyword is "{keyword}" and its source cell is {source_range}. '
+        "Explain what the keyword means specifically within this worksheet table or report. "
+        "Identify whether it is a title, row label, column header, grouped or merged header, "
+        "category, measure, value, note, or another visible worksheet element. Describe how "
+        "its data extends across rows or columns and how it relates to visible parent or child "
+        "labels, indentation levels, adjacent headers, merged header groups, units, periods, "
+        "categories, and values. Include concrete visible labels and values that would help a "
+        "later QA step answer a question using this evidence. If a relationship, header, unit, "
+        "or meaning is not visible, say that it is not visible instead of guessing. Do not "
+        "describe colors, layout positions, icons, people, scenery, trends, correlations, or "
+        "definitions unless the worksheet itself visibly supports them."
     )

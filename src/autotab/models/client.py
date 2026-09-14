@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import mimetypes
+from pathlib import Path
 from typing import Any, Protocol
 from urllib.request import Request, urlopen
 
 
 class ModelClient(Protocol):
-    def complete(self, prompt: str) -> str: ...
+    def complete(self, prompt: str, image_path: str | Path | None = None) -> str: ...
 
 
 class OpenAICompatibleClient:
@@ -30,12 +33,25 @@ class OpenAICompatibleClient:
             extra_body or {},
         )
 
-    def complete(self, prompt: str) -> str:
+    def complete(self, prompt: str, image_path: str | Path | None = None) -> str:
+        """Complete a prompt, optionally attaching a local image to the user message."""
+        content: str | list[dict[str, Any]] = prompt
+        if image_path is not None:
+            path = Path(image_path)
+            media_type = mimetypes.guess_type(path.name)[0] or "image/png"
+            encoded_image = base64.b64encode(path.read_bytes()).decode("ascii")
+            content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{encoded_image}"},
+                },
+            ]
         payload = {
             "model": self.model,
             "temperature": 0,
             "max_tokens": self.max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": content}],
             **self.extra_body,
         }
         request = Request(

@@ -48,7 +48,7 @@ class ExplorationPipeline:
                 models["vlm"]["base_url"],
                 models["vlm"]["model"],
                 8,
-                256,
+                int(models["vlm"].get("max_tokens", 512)),
                 models["vlm"].get("extra_body"),
             )
             if models.get("vlm", {}).get("base_url")
@@ -128,9 +128,12 @@ class ExplorationPipeline:
                             keyword,
                             f"{hit.document.sheet}!{hit.document.coordinate}",
                             cells,
+                            folder / "image.png",
                         )
                     )
-                    store.write_text(f"viewports/{folder_name}/response.txt", evidence_extractor.last_response)
+                    store.write_text(
+                        f"viewports/{folder_name}/response.txt", evidence_extractor.last_response
+                    )
         filtered = [
             EvidenceFilter().filter(
                 e, query, self.config["exploration"].get("uncertain_evidence", "drop")
