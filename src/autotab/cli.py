@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from .config import ConfigError, load_config
@@ -51,7 +51,7 @@ def main() -> int:
             evidence_path = ExplorationPipeline(config).run([args.workbook], args.query)
             run_root = evidence_path.parent.parent
         else:
-            run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%f")
+            run_id = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f")
             run_root = Path(config["runtime"]["artifact_root"]).resolve() / run_id
         evidence = evidence_path.read_text(encoding="utf-8") if evidence_path else None
         qa_artifacts = run_root / "qa"

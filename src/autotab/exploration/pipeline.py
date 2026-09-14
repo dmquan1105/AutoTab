@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 
 from openpyxl.utils.cell import range_boundaries
@@ -25,7 +25,7 @@ class ExplorationPipeline:
         self.config = config
 
     def run(self, workbooks: list[str], query: str) -> Path:
-        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+        run_id = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
         store = ArtifactStore(self.config["runtime"]["artifact_root"], run_id)
         snapshots = [
             WorkbookLoader().load(p, self.config["exploration"]["include_hidden_sheets"])
