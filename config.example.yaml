@@ -48,6 +48,8 @@ runtime:
 
 rendering:
   backend: libreoffice
+  # Use a separate PDFium process per render when greater than one.
+  workers: 1
   libreoffice_path: null
   timeout_seconds: 60
   image_resolution: 600

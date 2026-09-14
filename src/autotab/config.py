@@ -42,6 +42,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "rendering": {
         "backend": "libreoffice",
+        "workers": 1,
         "timeout_seconds": 60,
         "image_resolution": 600,
         "show_coordinates": True,
@@ -125,6 +126,10 @@ def validate_config(c: dict[str, Any]) -> None:
         raise ConfigError("exploration.window_size must be a positive odd integer")
     if int(e["max_concurrent_findings"]) <= 0:
         raise ConfigError("exploration.max_concurrent_findings must be positive")
+    if not isinstance(c["rendering"].get("workers"), int) or isinstance(
+        c["rendering"]["workers"], bool
+    ) or c["rendering"]["workers"] <= 0:
+        raise ConfigError("rendering.workers must be a positive integer")
     if not isinstance(e["send_query_to_vlm"], bool):
         raise ConfigError("exploration.send_query_to_vlm must be boolean")
     lw, sw = float(r["lexical_weight"]), float(r["semantic_weight"])

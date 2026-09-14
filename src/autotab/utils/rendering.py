@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
 import unicodedata
 from copy import copy
 from pathlib import Path
@@ -19,11 +21,18 @@ from PIL import Image, ImageChops, ImageDraw
 class WindowRenderer:
     """Render a workbook viewport while preserving workbook formatting."""
 
+    def __init__(self, workers: int = 1) -> None:
+        if not isinstance(workers, int) or isinstance(workers, bool) or workers <= 0:
+            raise ValueError("workers must be a positive integer")
+        self.workers = workers
+
     def render(
         self, workbook: str | Path, sheet: str, cell_range: str, output: Path, metadata: dict
     ) -> dict:
         try:
-            renderer = _render_with_libreoffice(workbook, sheet, cell_range, output)
+            renderer = _render_with_libreoffice(
+                workbook, sheet, cell_range, output, max_workers=self.workers
+            )
         except (FileNotFoundError, RuntimeError, ImportError):
             renderer = _render_with_pillow(workbook, sheet, cell_range, output)
         with Image.open(output) as image:
@@ -43,7 +52,12 @@ class WindowRenderer:
 
 
 def _render_with_libreoffice(
-    workbook: str | Path, sheet: str, cell_range: str, output: Path
+    workbook: str | Path,
+    sheet: str,
+    cell_range: str,
+    output: Path,
+    *,
+    max_workers: int = 1,
 ) -> str:
     soffice = shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
@@ -56,10 +70,6 @@ def _render_with_libreoffice(
                 break
     if not soffice:
         raise FileNotFoundError("LibreOffice executable not found")
-    try:
-        import pypdfium2
-    except ImportError as exc:
-        raise ImportError("pypdfium2 is required for LibreOffice rendering") from exc
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="autotab_render_") as temp:
         temp_dir = Path(temp)
@@ -103,21 +113,51 @@ def _render_with_libreoffice(
             raise RuntimeError(
                 result.stderr.strip() or result.stdout.strip() or "LibreOffice failed"
             )
-        document = pypdfium2.PdfDocument(str(pdf))
-        try:
-            page = document[0]
-            try:
-                bitmap = page.render(scale=600 / 72)
+        if max_workers > 1:
+            _render_pdf_page_in_subprocess(pdf, output, 600, timeout_seconds=60)
+        else:
+            # PDFium APIs are process-global and not thread-safe.
+            with _PDFIUM_LOCK:
                 try:
-                    bitmap.to_pil().save(output)
+                    import pypdfium2
+                except ImportError as exc:
+                    raise ImportError(
+                        "pypdfium2 is required for LibreOffice rendering"
+                    ) from exc
+                document = pypdfium2.PdfDocument(str(pdf))
+                try:
+                    page = document[0]
+                    try:
+                        bitmap = page.render(scale=600 / 72)
+                        try:
+                            bitmap.to_pil().save(output)
+                        finally:
+                            bitmap.close()
+                    finally:
+                        page.close()
                 finally:
-                    bitmap.close()
-            finally:
-                page.close()
-        finally:
-            document.close()
+                    document.close()
     _trim_image(output)
     return "libreoffice"
+
+
+_PDFIUM_LOCK = threading.Lock()
+
+
+def _render_pdf_page_in_subprocess(
+    pdf_path: Path, output: Path, resolution: int, *, timeout_seconds: float
+) -> None:
+    worker_path = Path(__file__).with_name("pdfium_worker.py").resolve()
+    result = subprocess.run(
+        [sys.executable, str(worker_path), str(pdf_path), str(output), str(resolution)],
+        capture_output=True,
+        text=True,
+        timeout=max(1, float(timeout_seconds)),
+        check=False,
+    )
+    if result.returncode or not output.is_file():
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError("PDFium worker failed" + (f": {detail}" if detail else ""))
 
 
 def _prepare_dimensions(ws: Any, cell_range: str) -> None:
