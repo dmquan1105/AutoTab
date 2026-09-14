@@ -11,10 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from TableAgent.configs import DEFAULT_CONFIG_PATH, load_config
 from service import create_model_client
+from TableAgent.configs import DEFAULT_CONFIG_PATH, load_config
 from TableAgent.stages.qa import TableQARunner
-
 
 DEFAULT_STRUCTURE_PATH = ROOT / "sample" / "structure.yaml"
 DEFAULT_WORKBOOK_PATH = ROOT / "sample" / "QA_sample.xlsx"

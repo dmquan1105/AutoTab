@@ -1,1 +1,1 @@
-Compare the adjusted quantities for each region and gender, identify the rows that exceed the NG threshold, and explain how the adjustment rate and overall status relate to those results.
+In the employee table on the Data_Synthesis worksheet, calculate base salary multiplied by KPI coefficient for EMP01, EMP02, and EMP03. Report each result and identify the employee with the highest calculated amount.

@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import sys
 
 from .config import ConfigError, load_config
 from .exploration.pipeline import ExplorationPipeline
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog="autotab")
     sub = parser.add_subparsers(dest="command", required=True)
     explore = sub.add_parser("explore")
@@ -17,7 +22,8 @@ def main() -> int:
     explore.add_argument("--query", required=True)
     args = parser.parse_args()
     try:
-        path = ExplorationPipeline(load_config(args.config)).run(args.workbook, args.query)
+        config = load_config(args.config)
+        path = ExplorationPipeline(config).run(args.workbook, args.query)
         print(path)
         return 0
     except (ConfigError, OSError, ValueError) as exc:

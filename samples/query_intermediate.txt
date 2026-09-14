@@ -1,1 +1,1 @@
-Which regions have an NG status, and what are their adjusted quantities?
+In the Data_Synthesis worksheet, which region has the highest total revenue across Tháng 1, Tháng 2, and Tháng 3, and what is that total?

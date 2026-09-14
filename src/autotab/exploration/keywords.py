@@ -23,10 +23,10 @@ class KeywordExtractor:
         if self.model is not None and hasattr(self.model, "extract_keywords"):
             try:
                 result = self.model.extract_keywords(query)
-            except Exception:
+            except (AttributeError, OSError, TypeError, ValueError):
                 result = None
             if result:
-                    return _deduplicate([str(keyword) for keyword in result])
+                return _deduplicate([str(keyword) for keyword in result])
         if self.model is not None and hasattr(self.model, "complete"):
             prompt = keyword_extraction_prompt(query)
             try:
@@ -36,8 +36,8 @@ class KeywordExtractor:
                 result = [normalize_phrase(str(item)) for item in payload if item]
                 if result:
                     return _deduplicate(result)
-            except Exception:
-                pass
+            except (AttributeError, OSError, TypeError, ValueError):
+                pass  # Model failures intentionally fall back to deterministic extraction.
         seen: set[str] = set()
         out: list[str] = []
         for match in re.finditer(r"[A-Za-z][\w$%/-]*", query):
