@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import Any, Self
 from urllib.request import Request
 
+from PIL import Image
+
 from autotab.config import ConfigError, load_config
 from autotab.exploration.evidence import EvidenceExtractor
 from autotab.exploration.filtering import EvidenceFilter
@@ -20,6 +22,7 @@ from autotab.utils.rendering import WindowRenderer
 def test_config_and_ranges() -> None:
     config = load_config("config.example.yaml")
     assert config["retrieval"]["lexical_weight"] == 0.45
+    assert config["rendering"]["workers"] == 1
     assert parse_cell("C4") == (4, 3)
     assert viewport("A1", 3, 3, 9) == "A1:C3"
 
@@ -29,6 +32,17 @@ def test_invalid_config() -> None:
         load_config("does-not-exist.yaml")
     except ConfigError:
         raise AssertionError("missing config should use defaults")
+
+
+def test_invalid_rendering_workers(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("rendering:\n  workers: 0\n", encoding="utf-8")
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        assert "rendering.workers" in str(exc)
+    else:
+        raise AssertionError("non-positive rendering workers should be rejected")
 
 
 def test_keywords_fallback() -> None:
@@ -73,6 +87,23 @@ def test_evidence_markdown_and_rendering(tmp_path: Path) -> None:
         "samples/sample.xlsx", "Relations_Test", "A1:B2", tmp_path / "x.png", {}
     )
     assert metadata["range"] == "A1:B2"
+
+
+def test_renderer_enables_isolated_pdfium_for_multiple_workers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    captured = {}
+
+    def fake_render(workbook, sheet, cell_range, output, *, max_workers):
+        captured["max_workers"] = max_workers
+        Image.new("RGB", (10, 10), "white").save(output)
+        return "libreoffice"
+
+    monkeypatch.setattr("autotab.utils.rendering._render_with_libreoffice", fake_render)
+
+    WindowRenderer(workers=3).render("book.xlsx", "Sheet1", "A1:B2", tmp_path / "x.png", {})
+
+    assert captured["max_workers"] == 3
 
 
 def test_viewport_prompt_requires_worksheet_grounding() -> None:

@@ -57,7 +57,7 @@ class ExplorationPipeline:
         keywords = KeywordExtractor(llm).extract(query)
         store.write_json("keywords.json", keywords)
         evidence: list[Evidence] = []
-        renderer = WindowRenderer()
+        renderer = WindowRenderer(self.config["rendering"].get("workers", 1))
         evidence_extractor = EvidenceExtractor(vlm)
         retriever = HybridCellRetriever(
             embedding=(
