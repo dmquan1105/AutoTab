@@ -6,6 +6,8 @@ from .evidence import Evidence
 
 
 class EvidenceFilter:
+    # TODO: Replace this with a LLM filter to determine if the information supplied
+    # helps with answering the query :v
     def filter(self, evidence: Evidence, query: str, uncertain: str = "drop") -> Evidence:
         relevant = any(
             token in (evidence.keyword + " " + evidence.description).lower()
