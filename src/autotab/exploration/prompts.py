@@ -19,6 +19,24 @@ def keyword_extraction_prompt(query: str) -> str:
     )
 
 
+def keyword_summary_prompt(keyword: str, query: str, descriptions: list[str]) -> str:
+    """Build the prompt for consolidating one keyword's evidence."""
+    evidence = "\n".join(f"- {description}" for description in descriptions)
+    return f"""Consolidate the worksheet evidence for the exact keyword "{keyword}" into one brief
+description that helps answer the user query. Use the query only to judge relevance, not as evidence.
+
+Do not rename the keyword or introduce other keywords, headings, or worksheet ranges. Do not perform
+calculations. Do not add facts or values that are absent from the supplied descriptions.
+
+Return only the consolidated description. If this keyword contributes nothing toward answering the
+query, return exactly DROP.
+
+User query: {query}
+
+Evidence descriptions:
+{evidence}"""
+
+
 def viewport_description_prompt(
     keyword: str, source_range: str, cells: list[dict[str, Any]]
 ) -> str:
@@ -37,5 +55,6 @@ def viewport_description_prompt(
         "later QA step answer a question using this evidence. If a relationship, header, unit, "
         "or meaning is not visible, say that it is not visible instead of guessing. Do not "
         "describe colors, layout positions, icons, people, scenery, trends, correlations, or "
-        "definitions unless the worksheet itself visibly supports them."
+        "definitions unless the worksheet itself visibly supports them. The keyword may span "
+        "multiple cells."
     )

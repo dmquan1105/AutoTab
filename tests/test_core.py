@@ -6,14 +6,15 @@ from urllib.request import Request
 from PIL import Image
 
 from autotab.config import ConfigError, load_config
-from autotab.exploration.evidence import EvidenceExtractor
+from autotab.exploration.evidence import Evidence, EvidenceExtractor
 from autotab.exploration.filtering import EvidenceFilter
 from autotab.exploration.ingestion import WorkbookLoader
 from autotab.exploration.keywords import KeywordExtractor, normalize_phrase
 from autotab.exploration.markdown import MarkdownWriter
 from autotab.exploration.pipeline import ExplorationPipeline
-from autotab.exploration.prompts import viewport_description_prompt
+from autotab.exploration.prompts import keyword_summary_prompt, viewport_description_prompt
 from autotab.exploration.retrieval import HybridCellRetriever
+from autotab.exploration.summary import KeywordSummarizer, KeywordSummary
 from autotab.models.client import OpenAICompatibleClient
 from autotab.utils.ranges import parse_cell, viewport
 from autotab.utils.rendering import WindowRenderer
@@ -63,6 +64,7 @@ def test_pipeline_and_artifacts(tmp_path: Path) -> None:
     config["runtime"]["artifact_root"] = str(tmp_path)
     output = ExplorationPipeline(config).run(["samples/sample.xlsx"], "Find revenue")
     assert output.exists() and (output.parent / "manifest.json").exists()
+    assert (output.parent / "aggregation.md").exists()
 
 
 def test_evidence_markdown_and_rendering(tmp_path: Path) -> None:
@@ -89,9 +91,52 @@ def test_evidence_markdown_and_rendering(tmp_path: Path) -> None:
     assert metadata["range"] == "A1:B2"
 
 
-def test_renderer_enables_isolated_pdfium_for_multiple_workers(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_keyword_summary_preserves_keywords_and_ranges() -> None:
+    class FakeLLM:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete(self, prompt: str, image_path: str | Path | None = None) -> str:
+            self.prompts.append(prompt)
+            assert "Which region has the highest revenue?" in prompt
+            if 'exact keyword "tháng 1"' in prompt:
+                return "January revenue is listed for each region."
+            return "DROP"
+
+    model = FakeLLM()
+    summaries = KeywordSummarizer(model).summarize(
+        "Which region has the highest revenue?",
+        [
+            Evidence("tháng 1", "Data!B4", "January revenue is shown by region."),
+            Evidence("tháng 1", "Other!B4", "January revenue appears on another sheet."),
+            Evidence("workbook", "Data!A1", "The workbook has a title."),
+        ],
+    )
+
+    assert len(model.prompts) == 2
+    assert summaries == [
+        KeywordSummary(
+            "tháng 1",
+            ("Data!B4", "Other!B4"),
+            "January revenue is listed for each region.",
+        )
+    ]
+    markdown = MarkdownWriter().write_summary(summaries)
+    assert "## tháng 1" in markdown
+    assert "`Data!B4`, `Other!B4`" in markdown
+    assert "## workbook" not in markdown
+
+
+def test_keyword_summary_prompt_requires_consolidation_and_filtering() -> None:
+    prompt = keyword_summary_prompt("revenue", "Find revenue", ["Revenue is a column."])
+
+    assert 'exact keyword "revenue"' in prompt
+    assert "Do not rename the keyword" in prompt
+    assert "Do not perform" in prompt
+    assert "return exactly DROP" in prompt
+
+
+def test_renderer_enables_isolated_pdfium_for_multiple_workers(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
     def fake_render(workbook, sheet, cell_range, output, *, max_workers):
