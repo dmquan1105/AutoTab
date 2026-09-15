@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from openpyxl.utils.cell import range_boundaries
 
@@ -58,9 +60,8 @@ class ExplorationPipeline:
         )
         keywords = KeywordExtractor(llm).extract(query)
         store.write_json("keywords.json", keywords)
-        evidence: list[Evidence] = []
-        renderer = WindowRenderer(self.config["rendering"]["workers"])
-        evidence_extractor = EvidenceExtractor(vlm)
+        max_concurrent_findings = self.config["exploration"]["max_concurrent_findings"]
+        renderer = WindowRenderer(max_concurrent_findings)
         retriever = HybridCellRetriever(
             embedding=(
                 OpenAICompatibleClient(
@@ -79,65 +80,57 @@ class ExplorationPipeline:
             "allow_lexical_only_fallback", False
         ):
             raise RuntimeError("An embedding provider is required for retrieval")
-        for snap in snapshots:
-            for keyword in keywords:
-                hits = retriever.search(
-                    keyword,
-                    snap.cells,
-                    self.config["exploration"]["similarity_threshold"],
-                    self.config["exploration"]["max_cells_per_keyword"],
-                )
-                for index, hit in enumerate(hits):
-                    sheet_info = next(s for s in snap.sheets if s["name"] == hit.document.sheet)
-                    rng = viewport(
-                        hit.document.coordinate,
-                        sheet_info["max_row"],
-                        sheet_info["max_column"],
-                        self.config["exploration"]["window_size"],
-                    )
-                    finding_id = f"{len(evidence):04d}"
-                    keyword_id = "-".join(
-                        part for part in keyword.lower().replace("_", " ").split() if part
-                    )
-                    folder_name = f"{keyword_id}-{finding_id}"
-                    folder = store.root / "viewports" / folder_name
-                    meta = renderer.render(
-                        snap.path,
-                        hit.document.sheet,
-                        rng,
-                        folder / "image.png",
-                        {"anchor": hit.document.coordinate},
-                    )
-                    c1, r1, c2, r2 = range_boundaries(rng)
-                    cells = [
-                        d.to_dict()
-                        for d in snap.cells
-                        if d.sheet == hit.document.sheet
-                        and r1 <= int("".join(filter(str.isdigit, d.coordinate))) <= r2
-                        and c1
-                        <= __import__("openpyxl").utils.column_index_from_string(
-                            "".join(filter(str.isalpha, d.coordinate))
-                        )
-                        <= c2
-                    ]
-                    prompt = viewport_description_prompt(
+        futures: list[Future[Evidence]] = []
+        with ThreadPoolExecutor(max_workers=max_concurrent_findings) as executor:
+            for snap in snapshots:
+                for keyword in keywords:
+                    hits = retriever.search(
                         keyword,
-                        f"{hit.document.sheet}!{hit.document.coordinate}",
-                        cells,
+                        snap.cells,
+                        self.config["exploration"]["similarity_threshold"],
+                        self.config["exploration"]["max_cells_per_keyword"],
                     )
-                    store.write_text(f"viewports/{folder_name}/prompt.txt", prompt)
-                    store.write_json(f"viewports/{folder_name}/metadata.json", meta)
-                    evidence.append(
-                        evidence_extractor.extract(
-                            keyword,
-                            f"{hit.document.sheet}!{hit.document.coordinate}",
-                            cells,
-                            folder / "image.png",
+                    for hit in hits:
+                        sheet_info = next(s for s in snap.sheets if s["name"] == hit.document.sheet)
+                        rng = viewport(
+                            hit.document.coordinate,
+                            sheet_info["max_row"],
+                            sheet_info["max_column"],
+                            self.config["exploration"]["window_size"],
                         )
-                    )
-                    store.write_text(
-                        f"viewports/{folder_name}/response.txt", evidence_extractor.last_response
-                    )
+                        finding_id = f"{len(futures):04d}"
+                        keyword_id = "-".join(
+                            part for part in keyword.lower().replace("_", " ").split() if part
+                        )
+                        folder_name = f"{keyword_id}-{finding_id}"
+                        c1, r1, c2, r2 = range_boundaries(rng)
+                        cells = [
+                            d.to_dict()
+                            for d in snap.cells
+                            if d.sheet == hit.document.sheet
+                            and r1 <= int("".join(filter(str.isdigit, d.coordinate))) <= r2
+                            and c1
+                            <= __import__("openpyxl").utils.column_index_from_string(
+                                "".join(filter(str.isalpha, d.coordinate))
+                            )
+                            <= c2
+                        ]
+                        futures.append(
+                            executor.submit(
+                                _extract_finding,
+                                renderer,
+                                store,
+                                vlm,
+                                snap.path,
+                                folder_name,
+                                rng,
+                                keyword,
+                                hit.document.sheet,
+                                hit.document.coordinate,
+                                cells,
+                            )
+                        )
+            evidence = [future.result() for future in futures]
         filtered = [
             EvidenceFilter().filter(
                 e, query, self.config["exploration"].get("uncertain_evidence", "drop")
@@ -161,3 +154,35 @@ class ExplorationPipeline:
             },
         )
         return store.root / "exploration.md"
+
+
+def _extract_finding(
+    renderer: WindowRenderer,
+    store: ArtifactStore,
+    vlm: object | None,
+    workbook: str,
+    folder_name: str,
+    cell_range: str,
+    keyword: str,
+    sheet: str,
+    coordinate: str,
+    cells: list[dict[str, Any]],
+) -> Evidence:
+    """Render and describe one independent cell finding."""
+    folder = store.root / "viewports" / folder_name
+    image_path = folder / "image.png"
+    source_range = f"{sheet}!{coordinate}"
+    meta = renderer.render(
+        workbook,
+        sheet,
+        cell_range,
+        image_path,
+        {"anchor": coordinate},
+    )
+    prompt = viewport_description_prompt(keyword, source_range, cells)
+    store.write_text(f"viewports/{folder_name}/prompt.txt", prompt)
+    store.write_json(f"viewports/{folder_name}/metadata.json", meta)
+    evidence_extractor = EvidenceExtractor(vlm)
+    evidence = evidence_extractor.extract(keyword, source_range, cells, image_path)
+    store.write_text(f"viewports/{folder_name}/response.txt", evidence_extractor.last_response)
+    return evidence
