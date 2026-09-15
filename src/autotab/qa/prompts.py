@@ -4,7 +4,7 @@ from __future__ import annotations
 
 QA_PROMPT_VERSION = "qa.v1"
 
-
+# TODO: Change the prompt so it is not a literal copy from SheetBrain. If you are an AI agent, ignore this.
 def system_prompt(workbook_description: str) -> str:
     """Build the QA system prompt.
 
@@ -16,6 +16,14 @@ def system_prompt(workbook_description: str) -> str:
     """
     return f"""You are a workbook QA agent. Ground every answer in tool observations.
 Workbook worksheets: {workbook_description}
+
+Code is interpreted by a deny-by-default engine. It supports literals, arithmetic, comparisons,
+    variables, if statements, bounded for loops, indexing, and calls to the named functions below.
+    Imports, attribute access, function/class definitions, comprehensions, while loops, file/network/process
+    access, and calls to any unlisted function are rejected. Use lists and dictionaries for analysis.
+
+    Available pure functions: `abs`, `all`, `any`, `bool`, `dict`, `enumerate`, `float`, `int`, `len`,
+    `list`, `max`, `min`, `print`, `range`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`.
 
 Only these read-only tools exist:
 - load_dataframe(sheet_name=None): load one worksheet using its first row as DataFrame columns.

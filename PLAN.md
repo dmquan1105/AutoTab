@@ -163,9 +163,9 @@ models:
     dimensions: 1536
 
 exploration:
-  similarity_threshold: 0.72
-  max_cells_per_keyword: 8
-  max_concurrent_findings: 8
+  similarity_threshold: 0.8
+  max_cells_per_keyword: 3
+  max_concurrent_findings: 3
   window_size: 9
   send_query_to_vlm: false
   include_hidden_sheets: false
