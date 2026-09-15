@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from pathlib import Path
 from typing import Any, Self
 from urllib.request import Request
@@ -23,7 +25,8 @@ from autotab.utils.rendering import WindowRenderer
 def test_config_and_ranges() -> None:
     config = load_config("config.example.yaml")
     assert config["retrieval"]["lexical_weight"] == 0.45
-    assert config["rendering"]["workers"] == 1
+    assert config["exploration"]["max_concurrent_findings"] == 3
+    assert "workers" not in config["rendering"]
     assert parse_cell("C4") == (4, 3)
     assert viewport("A1", 3, 3, 9) == "A1:C3"
 
@@ -35,15 +38,15 @@ def test_invalid_config() -> None:
         raise AssertionError("missing config should use defaults")
 
 
-def test_invalid_rendering_workers(tmp_path: Path) -> None:
+def test_invalid_max_concurrent_findings(tmp_path: Path) -> None:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("rendering:\n  workers: 0\n", encoding="utf-8")
+    config_path.write_text("exploration:\n  max_concurrent_findings: 0\n", encoding="utf-8")
     try:
         load_config(config_path)
     except ConfigError as exc:
-        assert "rendering.workers" in str(exc)
+        assert "exploration.max_concurrent_findings" in str(exc)
     else:
-        raise AssertionError("non-positive rendering workers should be rejected")
+        raise AssertionError("non-positive finding concurrency should be rejected")
 
 
 def test_keywords_fallback() -> None:
@@ -65,6 +68,42 @@ def test_pipeline_and_artifacts(tmp_path: Path) -> None:
     output = ExplorationPipeline(config).run(["samples/sample.xlsx"], "Find revenue")
     assert output.exists() and (output.parent / "manifest.json").exists()
     assert (output.parent / "aggregation.md").exists()
+
+
+def test_pipeline_bounds_concurrent_findings(tmp_path: Path, monkeypatch) -> None:
+    config = load_config("config.example.yaml")
+    config["runtime"]["artifact_root"] = str(tmp_path)
+    config["exploration"]["max_concurrent_findings"] = 2
+    config["exploration"]["similarity_threshold"] = 0.0
+    config["exploration"]["max_cells_per_keyword"] = 4
+    config["models"]["llm"]["base_url"] = None
+    config["models"]["vlm"]["base_url"] = None
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_render(self, workbook, sheet, cell_range, output, metadata):
+        nonlocal active, max_active
+        assert self.workers == config["exploration"]["max_concurrent_findings"]
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return {**metadata, "sheet": sheet, "range": cell_range}
+
+    def fake_extract(self, keyword, source_range, cells, image_path=None, *, query=None):
+        self.last_response = '{"description": "Revenue is shown."}'
+        return Evidence(keyword, source_range, "Revenue is shown.")
+
+    monkeypatch.setattr(WindowRenderer, "render", fake_render)
+    monkeypatch.setattr(EvidenceExtractor, "extract", fake_extract)
+    monkeypatch.setattr(KeywordSummarizer, "summarize", lambda self, query, evidence: [])
+
+    ExplorationPipeline(config).run(["samples/sample.xlsx"], "Find revenue")
+
+    assert max_active == config["exploration"]["max_concurrent_findings"]
 
 
 def test_evidence_markdown_and_rendering(tmp_path: Path) -> None:
