@@ -43,7 +43,7 @@ def main() -> int:
             model_config["base_url"],
             model_config["model"],
             config["runtime"]["request_timeout_seconds"],
-            int(model_config.get("max_tokens", 4000)),
+            int(model_config["max_tokens"]),
             model_config.get("extra_body"),
         )
         evidence_path = Path(args.evidence) if args.evidence else None

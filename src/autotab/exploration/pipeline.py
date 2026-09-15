@@ -18,6 +18,7 @@ from .keywords import KeywordExtractor
 from .markdown import MarkdownWriter
 from .prompts import viewport_description_prompt
 from .retrieval import HybridCellRetriever
+from .summary import KeywordSummarizer
 
 
 class ExplorationPipeline:
@@ -32,24 +33,25 @@ class ExplorationPipeline:
             for p in workbooks
         ]
         models = self.config.get("models", {})
+        request_timeout = self.config["runtime"]["request_timeout_seconds"]
         llm = (
             OpenAICompatibleClient(
-                models["llm"]["base_url"],
-                models["llm"]["model"],
-                8,
-                256,
-                models["llm"].get("extra_body"),
+                base_url=models["llm"]["base_url"],
+                model=models["llm"]["model"],
+                timeout=request_timeout,
+                max_tokens=int(models["llm"]["max_tokens"]),
+                extra_body=models["llm"].get("extra_body"),
             )
             if models.get("llm", {}).get("base_url")
             else None
         )
         vlm = (
             OpenAICompatibleClient(
-                models["vlm"]["base_url"],
-                models["vlm"]["model"],
-                8,
-                int(models["vlm"].get("max_tokens", 512)),
-                models["vlm"].get("extra_body"),
+                base_url=models["vlm"]["base_url"],
+                model=models["vlm"]["model"],
+                timeout=request_timeout,
+                max_tokens=int(models["vlm"]["max_tokens"]),
+                extra_body=models["vlm"].get("extra_body"),
             )
             if models.get("vlm", {}).get("base_url")
             else None
@@ -58,12 +60,14 @@ class ExplorationPipeline:
         store.write_json("keywords.json", keywords)
         evidence: list[Evidence] = []
         vlm_query = query if self.config["exploration"]["send_query_to_vlm"] else None
-        renderer = WindowRenderer(self.config["rendering"].get("workers", 1))
+        renderer = WindowRenderer(self.config["rendering"]["workers"])
         evidence_extractor = EvidenceExtractor(vlm)
         retriever = HybridCellRetriever(
             embedding=(
                 OpenAICompatibleClient(
-                    models["embedding"]["base_url"], models["embedding"]["model"]
+                    base_url=models["embedding"]["base_url"],
+                    model=models["embedding"]["model"],
+                    timeout=request_timeout,
                 )
                 if models.get("embedding", {}).get("base_url")
                 and not self.config["retrieval"].get("allow_lexical_only_fallback", False)
@@ -144,9 +148,12 @@ class ExplorationPipeline:
             for e in evidence
         ]
         store.write_json("evidence.filtered.json", [e.to_dict() for e in filtered])
+        aggregation = MarkdownWriter().write(run_id, filtered)
+        store.write_text("aggregation.md", aggregation)
+        summaries = KeywordSummarizer(llm).summarize(query, filtered)
         store.write_text(
             "exploration.md",
-            MarkdownWriter().write(run_id, filtered),
+            MarkdownWriter().write_summary(summaries),
         )
         store.write_json(
             "manifest.json",

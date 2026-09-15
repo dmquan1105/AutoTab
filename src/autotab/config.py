@@ -16,8 +16,8 @@ class ConfigError(ValueError):
 DEFAULTS: dict[str, Any] = {
     "project": {"name": "autotab", "python_version": "3.11"},
     "models": {
-        "llm": {"model": "gpt-5-mini"},
-        "vlm": {"model": "gpt-5-mini"},
+        "llm": {"model": "gpt-5-mini", "max_tokens": 512},
+        "vlm": {"model": "gpt-5-mini", "max_tokens": 512},
         "embedding": {"model": "text-embedding-3-small"},
     },
     "exploration": {
@@ -126,9 +126,11 @@ def validate_config(c: dict[str, Any]) -> None:
         raise ConfigError("exploration.window_size must be a positive odd integer")
     if int(e["max_concurrent_findings"]) <= 0:
         raise ConfigError("exploration.max_concurrent_findings must be positive")
-    if not isinstance(c["rendering"].get("workers"), int) or isinstance(
-        c["rendering"]["workers"], bool
-    ) or c["rendering"]["workers"] <= 0:
+    if (
+        not isinstance(c["rendering"].get("workers"), int)
+        or isinstance(c["rendering"]["workers"], bool)
+        or c["rendering"]["workers"] <= 0
+    ):
         raise ConfigError("rendering.workers must be a positive integer")
     if not isinstance(e["send_query_to_vlm"], bool):
         raise ConfigError("exploration.send_query_to_vlm must be boolean")
