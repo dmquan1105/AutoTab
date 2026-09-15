@@ -113,7 +113,20 @@ def test_viewport_prompt_requires_worksheet_grounding() -> None:
     assert "grouped or merged header" in prompt
     assert "extends across rows or columns" in prompt
     assert "not visible instead of guessing" in prompt
-    assert "later QA step" in prompt
+    assert "User query:" not in prompt
+    assert "later QA step" not in prompt
+
+    query_prompt = viewport_description_prompt(
+        "revenue",
+        "Sheet1!B3",
+        [],
+        query="Which region has the highest revenue?",
+    )
+    assert "User query: Which region has the highest revenue?" in query_prompt
+    assert (
+        "Include concrete visible labels and values that would help a later QA step answer a "
+        "question using this evidence."
+    ) in query_prompt
 
 
 def test_model_client_attaches_viewport_image(tmp_path: Path, monkeypatch) -> None:

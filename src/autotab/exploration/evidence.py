@@ -33,11 +33,13 @@ class EvidenceExtractor:
         source_range: str,
         cells: list[dict[str, Any]],
         image_path: str | Path | None = None,
+        *,
+        query: str | None = None,
     ) -> Evidence:
         """Describe a keyword using its rendered worksheet viewport."""
         if self.model is None or not hasattr(self.model, "complete"):
             raise RuntimeError("A VLM is required to generate viewport descriptions")
-        prompt = viewport_description_prompt(keyword, source_range, cells)
+        prompt = viewport_description_prompt(keyword, source_range, cells, query=query)
         last_error: Exception | None = None
         for attempt in range(2):
             try:

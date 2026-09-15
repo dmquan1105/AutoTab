@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-QA_PROMPT_VERSION = "qa.v2"
+QA_PROMPT_VERSION = "qa.v3"
 
 
 # TODO: Change the prompt so it is not a literal copy from SheetBrain. If you are an AI agent, ignore this.
@@ -27,14 +27,12 @@ Available pure functions: `abs`, `all`, `any`, `bool`, `dict`, `enumerate`, `flo
 `list`, `max`, `min`, `print`, `range`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`.
 
 You are allowed to use these functions to read the workbook:
-- load_dataframe(sheet_name=None, has_headers=False): load one worksheet as a DataFrame. By
-  default all worksheet rows remain data with numeric columns. Set has_headers=True to use the
-  first row as column labels.
-  Usage example: `print(load_dataframe("Sales", has_headers=True).head(1).to_dict("records"))`
-  Output: `[{{'Region': 'North', 'Amount': 10, 'Note': None}}]`
+- load_dataframe(sheet_name=None, has_headers=False, range_ref=None): load a worksheet table as a
+  DataFrame. Set range_ref to the table's rectangular A1 range when a worksheet contains titles or
+  multiple tables. With has_headers=True, merged and multi-row headers become unique column labels.
+  Usage example: `print(load_dataframe("Sales", has_headers=True, range_ref="A1:C3").to_dict("records"))`
+  Output: `[{{'Region': 'North', 'Amount': 10, 'Note': None}}, {{'Region': 'South', 'Amount': 20, 'Note': 'ok'}}]`
 - inspect_range(range_ref, sheet_name=None): return values from one A1 range as rows.
-  Usage example: `print(inspect_range("A1:B2", "Sales"))`
-  Output: `[['Region', 'Amount'], ['North', 10]]`
 
 Python runs in a restricted sandbox. Imports, files, network, processes, dynamic execution,
 workbook mutation, and non-allowlisted calls are forbidden. A bare tool call produces no

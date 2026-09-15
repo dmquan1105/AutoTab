@@ -79,6 +79,31 @@ def test_workbook_tools(workbook_path: Path) -> None:
         session.close()
 
 
+def test_load_dataframe_resolves_table_range_and_merged_headers() -> None:
+    session = WorkbookSession("samples/QA_sample.xlsx", max_range_cells=100)
+    try:
+        frame = session.load_dataframe("People", has_headers=True, range_ref="A1:G22")
+        assert list(frame.columns) == [
+            "No",
+            "First",
+            "Middle",
+            "Last",
+            "Birth",
+            "Admission",
+            "Score",
+        ]
+        assert len(frame) == 20
+        highest_score = frame.loc[frame["Score"].idxmax()]
+        assert highest_score[["First", "Middle", "Last", "Score"]].tolist() == [
+            "Nga",
+            "Anh",
+            "Ngo",
+            99,
+        ]
+    finally:
+        session.close()
+
+
 @pytest.mark.parametrize("range_ref", ["", "A0", "A", "A1:", "B2:A1"])
 def test_inspect_range_rejects_invalid_ranges(workbook_path: Path, range_ref: str) -> None:
     session = WorkbookSession(workbook_path, max_range_cells=3)
@@ -94,6 +119,10 @@ def test_workbook_tools_reject_sheet_bounds_and_size(workbook_path: Path) -> Non
     try:
         with pytest.raises(WorkbookToolError, match="Unknown worksheet"):
             session.load_dataframe("Missing")
+        with pytest.raises(WorkbookToolError, match="valid A1 range"):
+            session.load_dataframe("Sales", range_ref="A1:")
+        with pytest.raises(WorkbookToolError, match="outside"):
+            session.load_dataframe("Sales", range_ref="A1:D4")
         with pytest.raises(WorkbookToolError, match="outside"):
             session.inspect_range("D1")
         with pytest.raises(WorkbookToolError, match="cell limit"):
@@ -160,11 +189,11 @@ def test_sandbox_allows_prompted_pure_functions(workbook_path: Path) -> None:
 
 def test_system_prompt_documents_tool_usage_and_output() -> None:
     prompt = system_prompt("Sales (3 rows x 3 columns)")
-    assert "load_dataframe(sheet_name=None, has_headers=False)" in prompt
-    assert 'load_dataframe("Sales", has_headers=True)' in prompt
-    assert 'inspect_range("A1:B2", "Sales")' in prompt
-    assert prompt.count("Usage example:") == 2
-    assert prompt.count("Output:") == 2
+    assert "load_dataframe(sheet_name=None, has_headers=False, range_ref=None)" in prompt
+    assert 'load_dataframe("Sales", has_headers=True, range_ref="A1:C3")' in prompt
+    assert "merged and multi-row headers" in prompt
+    assert prompt.count("Usage example:") == 1
+    assert prompt.count("Output:") == 1
 
 
 def test_sandbox_captures_unicode_output(workbook_path: Path) -> None:

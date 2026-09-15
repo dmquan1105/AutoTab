@@ -57,6 +57,7 @@ class ExplorationPipeline:
         keywords = KeywordExtractor(llm).extract(query)
         store.write_json("keywords.json", keywords)
         evidence: list[Evidence] = []
+        vlm_query = query if self.config["exploration"]["send_query_to_vlm"] else None
         renderer = WindowRenderer(self.config["rendering"].get("workers", 1))
         evidence_extractor = EvidenceExtractor(vlm)
         retriever = HybridCellRetriever(
@@ -120,6 +121,7 @@ class ExplorationPipeline:
                         keyword,
                         f"{hit.document.sheet}!{hit.document.coordinate}",
                         cells,
+                        query=vlm_query,
                     )
                     store.write_text(f"viewports/{folder_name}/prompt.txt", prompt)
                     store.write_json(f"viewports/{folder_name}/metadata.json", meta)
@@ -129,6 +131,7 @@ class ExplorationPipeline:
                             f"{hit.document.sheet}!{hit.document.coordinate}",
                             cells,
                             folder / "image.png",
+                            query=vlm_query,
                         )
                     )
                     store.write_text(

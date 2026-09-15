@@ -83,16 +83,19 @@ or do not match either form. A format error becomes an observation/reminder and 
 def load_dataframe(
     sheet_name: str | None = None,
     has_headers: bool = False,
+    range_ref: str | None = None,
 ) -> pandas.DataFrame:
-    """Load the active or named worksheet as a DataFrame."""
+    """Load a worksheet table as a DataFrame."""
 ```
 
 - The workbook is bound to the tool when the QA run starts; there is no path argument.
 - A workbook can contain multiple worksheets, while a `DataFrame` is rectangular. Therefore one
   worksheet is loaded per call: omit `sheet_name` for the active sheet or pass an exact sheet
   name.
+- Set `range_ref` to a table's rectangular A1 range when a worksheet contains titles or multiple
+  tables; omit it to load the full worksheet.
 - Keep all worksheet rows as data with numeric columns by default. When `has_headers=True`, use
-  the worksheet's first row as column labels and subsequent rows as records.
+  merged and multi-row table headers as unique column labels and return subsequent rows as records.
 - Preserve empty cells as missing values and do not infer domain-specific types or table
   boundaries in this milestone.
 - Raise a specific validation error for an unknown sheet.
