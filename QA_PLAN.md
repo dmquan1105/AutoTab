@@ -80,7 +80,10 @@ or do not match either form. A format error becomes an observation/reminder and 
 ### `load_dataframe`
 
 ```python
-def load_dataframe(sheet_name: str | None = None) -> pandas.DataFrame:
+def load_dataframe(
+    sheet_name: str | None = None,
+    has_headers: bool = False,
+) -> pandas.DataFrame:
     """Load the active or named worksheet as a DataFrame."""
 ```
 
@@ -88,7 +91,8 @@ def load_dataframe(sheet_name: str | None = None) -> pandas.DataFrame:
 - A workbook can contain multiple worksheets, while a `DataFrame` is rectangular. Therefore one
   worksheet is loaded per call: omit `sheet_name` for the active sheet or pass an exact sheet
   name.
-- Use the worksheet's first row as column labels and subsequent rows as records.
+- Keep all worksheet rows as data with numeric columns by default. When `has_headers=True`, use
+  the worksheet's first row as column labels and subsequent rows as records.
 - Preserve empty cells as missing values and do not infer domain-specific types or table
   boundaries in this milestone.
 - Raise a specific validation error for an unknown sheet.

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-QA_PROMPT_VERSION = "qa.v1"
+QA_PROMPT_VERSION = "qa.v2"
+
 
 # TODO: Change the prompt so it is not a literal copy from SheetBrain. If you are an AI agent, ignore this.
 def system_prompt(workbook_description: str) -> str:
@@ -14,20 +15,26 @@ def system_prompt(workbook_description: str) -> str:
     Returns:
         The strict QA instructions supplied to the model.
     """
-    return f"""You are a workbook QA agent. Ground every answer in tool observations.
+    return f"""You are a workbook QA agent.
 Workbook worksheets: {workbook_description}
 
 Code is interpreted by a deny-by-default engine. It supports literals, arithmetic, comparisons,
-    variables, if statements, bounded for loops, indexing, and calls to the named functions below.
-    Imports, attribute access, function/class definitions, comprehensions, while loops, file/network/process
-    access, and calls to any unlisted function are rejected. Use lists and dictionaries for analysis.
+variables, if statements, bounded for loops, indexing, and calls to the named functions below.
+Imports, attribute access, function/class definitions, comprehensions, while loops, file/network/process
+access, and calls to any unlisted function are rejected. Use lists and dictionaries for analysis.
 
-    Available pure functions: `abs`, `all`, `any`, `bool`, `dict`, `enumerate`, `float`, `int`, `len`,
-    `list`, `max`, `min`, `print`, `range`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`.
+Available pure functions: `abs`, `all`, `any`, `bool`, `dict`, `enumerate`, `float`, `int`, `len`,
+`list`, `max`, `min`, `print`, `range`, `round`, `set`, `sorted`, `str`, `sum`, `tuple`, `zip`.
 
-Only these read-only tools exist:
-- load_dataframe(sheet_name=None): load one worksheet using its first row as DataFrame columns.
+You are allowed to use these functions to read the workbook:
+- load_dataframe(sheet_name=None, has_headers=False): load one worksheet as a DataFrame. By
+  default all worksheet rows remain data with numeric columns. Set has_headers=True to use the
+  first row as column labels.
+  Usage example: `print(load_dataframe("Sales", has_headers=True).head(1).to_dict("records"))`
+  Output: `[{{'Region': 'North', 'Amount': 10, 'Note': None}}]`
 - inspect_range(range_ref, sheet_name=None): return values from one A1 range as rows.
+  Usage example: `print(inspect_range("A1:B2", "Sales"))`
+  Output: `[['Region', 'Amount'], ['North', 10]]`
 
 Python runs in a restricted sandbox. Imports, files, network, processes, dynamic execution,
 workbook mutation, and non-allowlisted calls are forbidden. A bare tool call produces no

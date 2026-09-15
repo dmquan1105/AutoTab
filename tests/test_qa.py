@@ -14,6 +14,7 @@ from autotab.config import ConfigError, load_config
 from autotab.qa import worker
 from autotab.qa.agent import QAAgent
 from autotab.qa.parser import ResponseFormatError, parse_response
+from autotab.qa.prompts import system_prompt
 from autotab.qa.sandbox import Sandbox
 from autotab.qa.tools import WorkbookSession, WorkbookToolError
 from autotab.qa.types import Action, FinalAnswer
@@ -58,10 +59,15 @@ def test_workbook_tools(workbook_path: Path) -> None:
     session = WorkbookSession(workbook_path, max_range_cells=6)
     try:
         frame = session.load_dataframe()
-        assert list(frame.columns) == ["Region", "Amount", "Note"]
-        assert frame.loc[0, "Region"] == "North"
-        assert pd.isna(frame.loc[0, "Note"])
-        assert session.load_dataframe("Other").to_dict("records") == [{"Name": "A", "Value": 3}]
+        assert list(frame.columns) == [0, 1, 2]
+        assert frame.iloc[0].tolist() == ["Region", "Amount", "Note"]
+        frame_with_headers = session.load_dataframe(has_headers=True)
+        assert list(frame_with_headers.columns) == ["Region", "Amount", "Note"]
+        assert frame_with_headers.loc[0, "Region"] == "North"
+        assert pd.isna(frame_with_headers.loc[0, "Note"])
+        assert session.load_dataframe("Other", has_headers=True).to_dict("records") == [
+            {"Name": "A", "Value": 3}
+        ]
         assert session.inspect_range("B2") == [[10]]
         assert session.inspect_range("A1:B2", "Sales") == [
             ["Region", "Amount"],
@@ -123,13 +129,42 @@ def test_sandbox_allows_tools_and_dataframe_operations(workbook_path: Path) -> N
     before = workbook_path.read_bytes()
     sandbox = Sandbox(workbook_path, 10, 512, 2000, 100)
     result = sandbox.execute(
-        "df = load_dataframe('Sales')\n"
+        "df = load_dataframe('Sales', has_headers=True)\n"
         "ng = df[df['Amount'] > 10]\n"
         "print(ng[['Region', 'Amount']].to_dict('records'))"
     )
     assert result.success
     assert "South" in result.text
     assert workbook_path.read_bytes() == before
+
+
+def test_sandbox_allows_prompted_pure_functions(workbook_path: Path) -> None:
+    code = (
+        "values = [3, 1, 2]\n"
+        "print(abs(-2), all([True, True]), any([False, True]), bool(1))\n"
+        "print(dict(zip(['a', 'b'], [1, 2])), list(enumerate(values)))\n"
+        "print(float(2), int(2.5), len(values), max(values), min(values))\n"
+        "print(list(range(3)), round(1.25, 1), sorted(values), str(3))\n"
+        "print(set(values), sum(values), tuple(values))"
+    )
+    result = Sandbox(workbook_path, 10, 512, 2000, 100).execute(code)
+    assert result.success, result.text
+    assert result.text.splitlines() == [
+        "2 True True True",
+        "{'a': 1, 'b': 2} [(0, 3), (1, 1), (2, 2)]",
+        "2.0 2 3 3 1",
+        "[0, 1, 2] 1.2 [1, 2, 3] 3",
+        "{1, 2, 3} 6 (3, 1, 2)",
+    ]
+
+
+def test_system_prompt_documents_tool_usage_and_output() -> None:
+    prompt = system_prompt("Sales (3 rows x 3 columns)")
+    assert "load_dataframe(sheet_name=None, has_headers=False)" in prompt
+    assert 'load_dataframe("Sales", has_headers=True)' in prompt
+    assert 'inspect_range("A1:B2", "Sales")' in prompt
+    assert prompt.count("Usage example:") == 2
+    assert prompt.count("Output:") == 2
 
 
 def test_sandbox_captures_unicode_output(workbook_path: Path) -> None:

@@ -56,14 +56,17 @@ class WorkbookSession:
         """Close the workbook without saving it."""
         self._workbook.close()
 
-    def load_dataframe(self, sheet_name: str | None = None) -> pd.DataFrame:
+    def load_dataframe(
+        self, sheet_name: str | None = None, has_headers: bool = False
+    ) -> pd.DataFrame:
         """Load the active or named worksheet as a DataFrame.
 
         Args:
             sheet_name: Exact worksheet name, or None for the active worksheet.
+            has_headers: Whether to use the first row as column labels.
 
         Returns:
-            Worksheet records with the first row used as column labels.
+            Worksheet values as a DataFrame.
 
         Raises:
             WorkbookToolError: If the worksheet name is unknown.
@@ -72,7 +75,13 @@ class WorkbookSession:
         rows = list(sheet.iter_rows(values_only=True))
         if not rows:
             return pd.DataFrame()
-        return pd.DataFrame(rows[1:], columns=list(rows[0]))
+        if has_headers and len(rows) > 1:
+            headers = [
+                str(value) if value is not None else f"Col{index}"
+                for index, value in enumerate(rows[0])
+            ]
+            return pd.DataFrame(rows[1:], columns=headers)
+        return pd.DataFrame(rows)
 
     def inspect_range(
         self, range_ref: str, sheet_name: str | None = None
