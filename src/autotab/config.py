@@ -54,26 +54,7 @@ DEFAULTS: dict[str, Any] = {
         "max_image_pixels": 33554432,
         "trim_padding": 6,
     },
-    "qa": {
-        "exploration_enabled": True,
-        "max_turns": 10,
-        "max_code_chars": 10000,
-        "max_observation_chars": 20000,
-        "sandbox": {"timeout_seconds": 10, "memory_limit_mb": 512},
-        "tools": {"max_range_cells": 10000},
-    },
 }
-
-QA_KEYS = {
-    "exploration_enabled",
-    "max_turns",
-    "max_code_chars",
-    "max_observation_chars",
-    "sandbox",
-    "tools",
-}
-QA_SANDBOX_KEYS = {"timeout_seconds", "memory_limit_mb"}
-QA_TOOL_KEYS = {"max_range_cells"}
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -152,28 +133,3 @@ def validate_config(c: dict[str, Any]) -> None:
         raise ConfigError("retrieval weights must be in [0,1] and sum to 1")
     if e.get("uncertain_evidence", "drop") not in {"keep", "drop"}:
         raise ConfigError("uncertain_evidence must be keep or drop")
-    qa = c["qa"]
-    _reject_unknown_keys("qa", qa, QA_KEYS)
-    _reject_unknown_keys("qa.sandbox", qa["sandbox"], QA_SANDBOX_KEYS)
-    _reject_unknown_keys("qa.tools", qa["tools"], QA_TOOL_KEYS)
-    if not isinstance(qa["exploration_enabled"], bool):
-        raise ConfigError("qa.exploration_enabled must be boolean")
-    limits = {
-        "qa.max_turns": qa["max_turns"],
-        "qa.max_code_chars": qa["max_code_chars"],
-        "qa.max_observation_chars": qa["max_observation_chars"],
-        "qa.sandbox.timeout_seconds": qa["sandbox"]["timeout_seconds"],
-        "qa.sandbox.memory_limit_mb": qa["sandbox"]["memory_limit_mb"],
-        "qa.tools.max_range_cells": qa["tools"]["max_range_cells"],
-    }
-    for name, value in limits.items():
-        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
-            raise ConfigError(f"{name} must be a positive integer")
-
-
-def _reject_unknown_keys(section: str, values: object, allowed: set[str]) -> None:
-    if not isinstance(values, dict):
-        raise ConfigError(f"{section} must be a mapping")
-    unknown = set(values) - allowed
-    if unknown:
-        raise ConfigError(f"Unknown {section} key: {min(unknown)}")

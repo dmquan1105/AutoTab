@@ -59,14 +59,3 @@ rendering:
   max_image_dimension: 8192
   max_image_pixels: 33554432
   trim_padding: 6
-
-qa:
-  exploration_enabled: true
-  max_turns: 10
-  max_code_chars: 10000
-  max_observation_chars: 20000
-  sandbox:
-    timeout_seconds: 10
-    memory_limit_mb: 512
-  tools:
-    max_range_cells: 10000

@@ -7,6 +7,7 @@ import sys
 
 from .config import ConfigError, load_config
 from .exploration.pipeline import ExplorationPipeline
+from .qa.pipeline import QAPipeline
 
 
 def main() -> int:
@@ -20,10 +21,17 @@ def main() -> int:
     explore.add_argument("--config", default="config.yaml")
     explore.add_argument("--workbook", action="append", required=True)
     explore.add_argument("--query", required=True)
+    qa = sub.add_parser("qa")
+    qa.add_argument("--config", default="config.yaml")
+    qa.add_argument("--workbook", required=True)
+    qa.add_argument("--query", required=True)
     args = parser.parse_args()
     try:
         config = load_config(args.config)
-        path = ExplorationPipeline(config).run(args.workbook, args.query)
+        if args.command == "explore":
+            path = ExplorationPipeline(config).run(args.workbook, args.query)
+        else:
+            path = QAPipeline(config).run(args.workbook, args.query)
         print(path)
         return 0
     except (ConfigError, OSError, ValueError) as exc:
