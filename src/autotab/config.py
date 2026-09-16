@@ -42,8 +42,10 @@ DEFAULTS: dict[str, Any] = {
     },
     "rendering": {
         "backend": "libreoffice",
+        "workers": 2,
+        "libreoffice_path": None,
         "timeout_seconds": 60,
-        "image_resolution": 600,
+        "image_resolution": 300,
         "show_coordinates": True,
         "min_cell_width": 10,
         "max_cell_width": 50,
@@ -125,6 +127,24 @@ def validate_config(c: dict[str, Any]) -> None:
         raise ConfigError("exploration.window_size must be a positive odd integer")
     if int(e["max_concurrent_findings"]) <= 0:
         raise ConfigError("exploration.max_concurrent_findings must be positive")
+    rendering_limits = {
+        "rendering.workers": c["rendering"]["workers"],
+        "rendering.timeout_seconds": c["rendering"]["timeout_seconds"],
+        "rendering.image_resolution": c["rendering"]["image_resolution"],
+        "rendering.max_image_dimension": c["rendering"]["max_image_dimension"],
+        "rendering.max_image_pixels": c["rendering"]["max_image_pixels"],
+    }
+    for name, value in rendering_limits.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+            raise ConfigError(f"{name} must be positive")
+    if not isinstance(c["rendering"]["workers"], int):
+        raise ConfigError("rendering.workers must be a positive integer")
+    if not isinstance(c["rendering"]["image_resolution"], int):
+        raise ConfigError("rendering.image_resolution must be a positive integer")
+    if not isinstance(c["rendering"]["max_image_dimension"], int):
+        raise ConfigError("rendering.max_image_dimension must be a positive integer")
+    if not isinstance(c["rendering"]["max_image_pixels"], int):
+        raise ConfigError("rendering.max_image_pixels must be a positive integer")
     if not isinstance(e["send_query_to_vlm"], bool):
         raise ConfigError("exploration.send_query_to_vlm must be boolean")
     lw, sw = float(r["lexical_weight"]), float(r["semantic_weight"])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,8 @@ class ExplorationPipeline:
         self.config = config
 
     def run(self, workbooks: list[str], query: str) -> Path:
-        run_id = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S")
+        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f")
+        run_id = f"{timestamp}-{os.getpid()}"
         store = ArtifactStore(self.config["runtime"]["artifact_root"], run_id)
         snapshots = [
             WorkbookLoader().load(p, self.config["exploration"]["include_hidden_sheets"])
@@ -61,7 +63,15 @@ class ExplorationPipeline:
         keywords = KeywordExtractor(llm).extract(query)
         store.write_json("keywords.json", keywords)
         max_concurrent_findings = self.config["exploration"]["max_concurrent_findings"]
-        renderer = WindowRenderer(max_concurrent_findings)
+        rendering = self.config["rendering"]
+        renderer = WindowRenderer(
+            workers=int(rendering["workers"]),
+            libreoffice_path=rendering.get("libreoffice_path"),
+            timeout_seconds=float(rendering["timeout_seconds"]),
+            image_resolution=int(rendering["image_resolution"]),
+            max_image_dimension=int(rendering["max_image_dimension"]),
+            max_image_pixels=int(rendering["max_image_pixels"]),
+        )
         retriever = HybridCellRetriever(
             embedding=(
                 OpenAICompatibleClient(

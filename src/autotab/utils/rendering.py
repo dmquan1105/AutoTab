@@ -17,24 +17,69 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import range_boundaries
 from PIL import Image, ImageChops, ImageDraw
 
+from .pdfium_worker import bounded_scale
+
 
 class WindowRenderer:
     """Render a workbook viewport while preserving workbook formatting."""
 
-    def __init__(self, workers: int = 1) -> None:
+    def __init__(
+        self,
+        workers: int = 1,
+        *,
+        libreoffice_path: str | Path | None = None,
+        timeout_seconds: float = 60,
+        image_resolution: int = 300,
+        max_image_dimension: int = 8192,
+        max_image_pixels: int = 33_554_432,
+    ) -> None:
         if not isinstance(workers, int) or isinstance(workers, bool) or workers <= 0:
             raise ValueError("workers must be a positive integer")
+        if (
+            not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be positive")
+        for name, value in (
+            ("image_resolution", image_resolution),
+            ("max_image_dimension", max_image_dimension),
+            ("max_image_pixels", max_image_pixels),
+        ):
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
         self.workers = workers
+        self.libreoffice_path = libreoffice_path
+        self.timeout_seconds = float(timeout_seconds)
+        self.image_resolution = image_resolution
+        self.max_image_dimension = max_image_dimension
+        self.max_image_pixels = max_image_pixels
+        self._semaphore = threading.BoundedSemaphore(workers)
 
     def render(
         self, workbook: str | Path, sheet: str, cell_range: str, output: Path, metadata: dict
     ) -> dict:
-        try:
-            renderer = _render_with_libreoffice(
-                workbook, sheet, cell_range, output, max_workers=self.workers
-            )
-        except (FileNotFoundError, RuntimeError, ImportError):
-            renderer = _render_with_pillow(workbook, sheet, cell_range, output)
+        warning = None
+        with self._semaphore:
+            try:
+                renderer = _render_with_libreoffice(
+                    workbook,
+                    sheet,
+                    cell_range,
+                    output,
+                    max_workers=self.workers,
+                    libreoffice_path=self.libreoffice_path,
+                    timeout_seconds=self.timeout_seconds,
+                    image_resolution=self.image_resolution,
+                    max_image_dimension=self.max_image_dimension,
+                    max_image_pixels=self.max_image_pixels,
+                )
+            except subprocess.TimeoutExpired as exc:
+                warning = f"Viewport rendering timed out after {exc.timeout} seconds"
+                renderer = _render_with_pillow(workbook, sheet, cell_range, output)
+            except (FileNotFoundError, RuntimeError, ImportError):
+                renderer = _render_with_pillow(workbook, sheet, cell_range, output)
+            _constrain_image(output, self.max_image_dimension, self.max_image_pixels)
         with Image.open(output) as image:
             width, height = image.size
         metadata.update(
@@ -44,10 +89,12 @@ class WindowRenderer:
                 "image_width": width,
                 "image_height": height,
                 "renderer": renderer,
-                "resolution": 600 if renderer == "libreoffice" else 1,
+                "resolution": self.image_resolution if renderer == "libreoffice" else 1,
                 "coordinate_visibility": True,
             }
         )
+        if warning:
+            metadata["render_warning"] = warning
         return metadata
 
 
@@ -58,8 +105,16 @@ def _render_with_libreoffice(
     output: Path,
     *,
     max_workers: int = 1,
+    libreoffice_path: str | Path | None = None,
+    timeout_seconds: float = 60,
+    image_resolution: int = 300,
+    max_image_dimension: int = 8192,
+    max_image_pixels: int = 33_554_432,
 ) -> str:
-    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    soffice = str(libreoffice_path) if libreoffice_path else None
+    if soffice and not Path(soffice).is_file():
+        raise FileNotFoundError(f"LibreOffice executable not found: {soffice}")
+    soffice = soffice or shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         for candidate in (
             r"C:\Program Files\LibreOffice\program\soffice.exe",
@@ -108,27 +163,46 @@ def _render_with_libreoffice(
             str(temp_dir),
             str(prepared),
         ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60, check=False)
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=max(1, float(timeout_seconds)),
+            check=False,
+        )
         if result.returncode or not pdf.is_file():
             raise RuntimeError(
                 result.stderr.strip() or result.stdout.strip() or "LibreOffice failed"
             )
         if max_workers > 1:
-            _render_pdf_page_in_subprocess(pdf, output, 600, timeout_seconds=60)
+            _render_pdf_page_in_subprocess(
+                pdf,
+                output,
+                image_resolution,
+                timeout_seconds=timeout_seconds,
+                max_image_dimension=max_image_dimension,
+                max_image_pixels=max_image_pixels,
+            )
         else:
             # PDFium APIs are process-global and not thread-safe.
             with _PDFIUM_LOCK:
                 try:
                     import pypdfium2
                 except ImportError as exc:
-                    raise ImportError(
-                        "pypdfium2 is required for LibreOffice rendering"
-                    ) from exc
+                    raise ImportError("pypdfium2 is required for LibreOffice rendering") from exc
                 document = pypdfium2.PdfDocument(str(pdf))
                 try:
                     page = document[0]
                     try:
-                        bitmap = page.render(scale=600 / 72)
+                        width, height = page.get_size()
+                        scale = bounded_scale(
+                            width,
+                            height,
+                            image_resolution,
+                            max_image_dimension,
+                            max_image_pixels,
+                        )
+                        bitmap = page.render(scale=scale)
                         try:
                             bitmap.to_pil().save(output)
                         finally:
@@ -145,11 +219,25 @@ _PDFIUM_LOCK = threading.Lock()
 
 
 def _render_pdf_page_in_subprocess(
-    pdf_path: Path, output: Path, resolution: int, *, timeout_seconds: float
+    pdf_path: Path,
+    output: Path,
+    resolution: int,
+    *,
+    timeout_seconds: float,
+    max_image_dimension: int,
+    max_image_pixels: int,
 ) -> None:
     worker_path = Path(__file__).with_name("pdfium_worker.py").resolve()
     result = subprocess.run(
-        [sys.executable, str(worker_path), str(pdf_path), str(output), str(resolution)],
+        [
+            sys.executable,
+            str(worker_path),
+            str(pdf_path),
+            str(output),
+            str(resolution),
+            str(max_image_dimension),
+            str(max_image_pixels),
+        ],
         capture_output=True,
         text=True,
         timeout=max(1, float(timeout_seconds)),
@@ -258,6 +346,20 @@ def _trim_image(path: Path) -> None:
                     min(rgb.height, bbox[3] + 6),
                 )
             ).save(path)
+
+
+def _constrain_image(path: Path, max_dimension: int, max_pixels: int) -> None:
+    with Image.open(path) as image:
+        width, height = image.size
+        factor = min(
+            1.0,
+            max_dimension / max(1, width),
+            max_dimension / max(1, height),
+            (max_pixels / max(1, width * height)) ** 0.5,
+        )
+        if factor < 1:
+            size = (max(1, int(width * factor)), max(1, int(height * factor)))
+            image.resize(size, Image.Resampling.LANCZOS).save(path)
 
 
 def _display_width(value: str) -> int:

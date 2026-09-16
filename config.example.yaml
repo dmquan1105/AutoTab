@@ -48,9 +48,10 @@ runtime:
 
 rendering:
   backend: libreoffice
+  workers: 2
   libreoffice_path: null
   timeout_seconds: 60
-  image_resolution: 600
+  image_resolution: 300
   show_coordinates: true
   min_cell_width: 10
   max_cell_width: 50

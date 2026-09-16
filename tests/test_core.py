@@ -1,6 +1,8 @@
 import json
+import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Self
 from urllib.request import Request
@@ -18,6 +20,7 @@ from autotab.exploration.prompts import keyword_summary_prompt, viewport_descrip
 from autotab.exploration.retrieval import HybridCellRetriever
 from autotab.exploration.summary import KeywordSummarizer, KeywordSummary
 from autotab.models.client import OpenAICompatibleClient
+from autotab.utils.pdfium_worker import bounded_scale
 from autotab.utils.ranges import parse_cell, viewport
 from autotab.utils.rendering import WindowRenderer
 
@@ -26,7 +29,8 @@ def test_config_and_ranges() -> None:
     config = load_config("config.example.yaml")
     assert config["retrieval"]["lexical_weight"] == 0.45
     assert config["exploration"]["max_concurrent_findings"] == 3
-    assert "workers" not in config["rendering"]
+    assert config["rendering"]["workers"] == 2
+    assert config["rendering"]["image_resolution"] == 300
     assert parse_cell("C4") == (4, 3)
     assert viewport("A1", 3, 3, 9) == "A1:C3"
 
@@ -47,6 +51,17 @@ def test_invalid_max_concurrent_findings(tmp_path: Path) -> None:
         assert "exploration.max_concurrent_findings" in str(exc)
     else:
         raise AssertionError("non-positive finding concurrency should be rejected")
+
+
+def test_invalid_render_workers(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("rendering:\n  workers: 0\n", encoding="utf-8")
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        assert "rendering.workers" in str(exc)
+    else:
+        raise AssertionError("non-positive render concurrency should be rejected")
 
 
 def test_keywords_fallback() -> None:
@@ -73,7 +88,8 @@ def test_pipeline_and_artifacts(tmp_path: Path) -> None:
 def test_pipeline_bounds_concurrent_findings(tmp_path: Path, monkeypatch) -> None:
     config = load_config("config.example.yaml")
     config["runtime"]["artifact_root"] = str(tmp_path)
-    config["exploration"]["max_concurrent_findings"] = 2
+    config["exploration"]["max_concurrent_findings"] = 5
+    config["rendering"]["workers"] = 2
     config["exploration"]["similarity_threshold"] = 0.0
     config["exploration"]["max_cells_per_keyword"] = 4
     config["models"]["llm"]["base_url"] = None
@@ -84,7 +100,11 @@ def test_pipeline_bounds_concurrent_findings(tmp_path: Path, monkeypatch) -> Non
 
     def fake_render(self, workbook, sheet, cell_range, output, metadata):
         nonlocal active, max_active
-        assert self.workers == config["exploration"]["max_concurrent_findings"]
+        assert self.workers == config["rendering"]["workers"]
+        assert self.timeout_seconds == config["rendering"]["timeout_seconds"]
+        assert self.image_resolution == config["rendering"]["image_resolution"]
+        assert self.max_image_dimension == config["rendering"]["max_image_dimension"]
+        assert self.max_image_pixels == config["rendering"]["max_image_pixels"]
         with lock:
             active += 1
             max_active = max(max_active, active)
@@ -103,7 +123,8 @@ def test_pipeline_bounds_concurrent_findings(tmp_path: Path, monkeypatch) -> Non
 
     ExplorationPipeline(config).run(["samples/sample.xlsx"], "Find revenue")
 
-    assert max_active == config["exploration"]["max_concurrent_findings"]
+    assert config["rendering"]["workers"] < max_active
+    assert max_active <= config["exploration"]["max_concurrent_findings"]
 
 
 def test_evidence_markdown_and_rendering(tmp_path: Path) -> None:
@@ -175,19 +196,96 @@ def test_keyword_summary_prompt_requires_consolidation_and_filtering() -> None:
     assert "return exactly DROP" in prompt
 
 
-def test_renderer_enables_isolated_pdfium_for_multiple_workers(tmp_path: Path, monkeypatch) -> None:
+def test_renderer_passes_config_to_libreoffice(tmp_path: Path, monkeypatch) -> None:
     captured = {}
 
-    def fake_render(workbook, sheet, cell_range, output, *, max_workers):
-        captured["max_workers"] = max_workers
+    def fake_render(workbook, sheet, cell_range, output, **options):
+        captured.update(options)
         Image.new("RGB", (10, 10), "white").save(output)
         return "libreoffice"
 
     monkeypatch.setattr("autotab.utils.rendering._render_with_libreoffice", fake_render)
 
-    WindowRenderer(workers=3).render("book.xlsx", "Sheet1", "A1:B2", tmp_path / "x.png", {})
+    WindowRenderer(
+        workers=3,
+        libreoffice_path="soffice.exe",
+        timeout_seconds=17,
+        image_resolution=240,
+        max_image_dimension=4096,
+        max_image_pixels=8_000_000,
+    ).render("book.xlsx", "Sheet1", "A1:B2", tmp_path / "x.png", {})
 
     assert captured["max_workers"] == 3
+    assert captured["libreoffice_path"] == "soffice.exe"
+    assert captured["timeout_seconds"] == 17
+    assert captured["image_resolution"] == 240
+    assert captured["max_image_dimension"] == 4096
+    assert captured["max_image_pixels"] == 8_000_000
+
+
+def test_renderer_bounds_concurrent_work(tmp_path: Path, monkeypatch) -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def fake_render(workbook, sheet, cell_range, output, **options):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.05)
+        Image.new("RGB", (10, 10), "white").save(output)
+        with lock:
+            active -= 1
+        return "libreoffice"
+
+    monkeypatch.setattr("autotab.utils.rendering._render_with_libreoffice", fake_render)
+    renderer = WindowRenderer(workers=2)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [
+            executor.submit(
+                renderer.render,
+                "book.xlsx",
+                "Sheet1",
+                "A1:B2",
+                tmp_path / f"{index}.png",
+                {},
+            )
+            for index in range(6)
+        ]
+        for future in futures:
+            future.result()
+
+    assert max_active == 2
+
+
+def test_renderer_records_timeout_and_falls_back(tmp_path: Path, monkeypatch) -> None:
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired("soffice", 7)
+
+    def fallback(workbook, sheet, cell_range, output):
+        Image.new("RGB", (10, 10), "white").save(output)
+        return "pillow_fallback"
+
+    monkeypatch.setattr("autotab.utils.rendering._render_with_libreoffice", timed_out)
+    monkeypatch.setattr("autotab.utils.rendering._render_with_pillow", fallback)
+
+    metadata = WindowRenderer(timeout_seconds=7, max_image_dimension=5).render(
+        "book.xlsx", "Sheet1", "A1:B2", tmp_path / "x.png", {}
+    )
+
+    assert metadata["renderer"] == "pillow_fallback"
+    assert metadata["render_warning"] == "Viewport rendering timed out after 7 seconds"
+    assert metadata["image_width"] == 5
+    assert metadata["image_height"] == 5
+
+
+def test_pdf_scale_respects_dimension_and_pixel_limits() -> None:
+    scale = bounded_scale(1200, 900, 600, 1000, 500_000)
+
+    assert 1200 * scale <= 1000
+    assert 900 * scale <= 1000
+    assert (1200 * scale) * (900 * scale) <= 500_000
 
 
 def test_viewport_prompt_requires_worksheet_grounding() -> None:
