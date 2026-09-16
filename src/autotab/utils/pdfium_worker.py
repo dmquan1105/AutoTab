@@ -3,10 +3,37 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 
-def render_pdf_page(pdf_path: str | Path, image_path: str | Path, resolution: int) -> None:
+def bounded_scale(
+    width: float,
+    height: float,
+    resolution: int,
+    max_image_dimension: int,
+    max_image_pixels: int,
+) -> float:
+    """Return a PDF render scale constrained by configured image limits."""
+    scale = resolution / 72
+    pixel_width = max(1.0, width * scale)
+    pixel_height = max(1.0, height * scale)
+    dimension_factor = min(
+        1.0,
+        max_image_dimension / pixel_width,
+        max_image_dimension / pixel_height,
+    )
+    pixel_factor = min(1.0, math.sqrt(max_image_pixels / (pixel_width * pixel_height)))
+    return scale * min(dimension_factor, pixel_factor)
+
+
+def render_pdf_page(
+    pdf_path: str | Path,
+    image_path: str | Path,
+    resolution: int,
+    max_image_dimension: int,
+    max_image_pixels: int,
+) -> None:
     try:
         import pypdfium2
     except ImportError as exc:
@@ -18,7 +45,15 @@ def render_pdf_page(pdf_path: str | Path, image_path: str | Path, resolution: in
     try:
         page = document[0]
         try:
-            bitmap = page.render(scale=max(1, int(resolution)) / 72)
+            width, height = page.get_size()
+            scale = bounded_scale(
+                width,
+                height,
+                resolution,
+                max_image_dimension,
+                max_image_pixels,
+            )
+            bitmap = page.render(scale=scale)
             try:
                 bitmap.to_pil().save(destination)
             finally:
@@ -34,8 +69,16 @@ def main() -> int:
     parser.add_argument("pdf_path")
     parser.add_argument("image_path")
     parser.add_argument("resolution", type=int)
+    parser.add_argument("max_image_dimension", type=int)
+    parser.add_argument("max_image_pixels", type=int)
     args = parser.parse_args()
-    render_pdf_page(args.pdf_path, args.image_path, args.resolution)
+    render_pdf_page(
+        args.pdf_path,
+        args.image_path,
+        args.resolution,
+        args.max_image_dimension,
+        args.max_image_pixels,
+    )
     return 0
 
 
