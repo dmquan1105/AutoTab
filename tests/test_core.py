@@ -223,7 +223,7 @@ def test_renderer_passes_config_to_libreoffice(tmp_path: Path, monkeypatch) -> N
     assert captured["max_image_pixels"] == 8_000_000
 
 
-def test_renderer_bounds_concurrent_work(tmp_path: Path, monkeypatch) -> None:
+def test_renderers_share_process_concurrency_limit(tmp_path: Path, monkeypatch) -> None:
     active = 0
     max_active = 0
     lock = threading.Lock()
@@ -240,11 +240,11 @@ def test_renderer_bounds_concurrent_work(tmp_path: Path, monkeypatch) -> None:
         return "libreoffice"
 
     monkeypatch.setattr("autotab.utils.rendering._render_with_libreoffice", fake_render)
-    renderer = WindowRenderer(workers=2)
+    renderers = [WindowRenderer(workers=2) for _ in range(6)]
     with ThreadPoolExecutor(max_workers=6) as executor:
         futures = [
             executor.submit(
-                renderer.render,
+                renderers[index].render,
                 "book.xlsx",
                 "Sheet1",
                 "A1:B2",

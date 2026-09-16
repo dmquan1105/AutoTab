@@ -19,6 +19,14 @@ from PIL import Image, ImageChops, ImageDraw
 
 from .pdfium_worker import bounded_scale
 
+_RENDER_SEMAPHORES: dict[int, threading.BoundedSemaphore] = {}
+_RENDER_SEMAPHORES_LOCK = threading.Lock()
+
+
+def _shared_render_semaphore(workers: int) -> threading.BoundedSemaphore:
+    with _RENDER_SEMAPHORES_LOCK:
+        return _RENDER_SEMAPHORES.setdefault(workers, threading.BoundedSemaphore(workers))
+
 
 class WindowRenderer:
     """Render a workbook viewport while preserving workbook formatting."""
@@ -54,7 +62,7 @@ class WindowRenderer:
         self.image_resolution = image_resolution
         self.max_image_dimension = max_image_dimension
         self.max_image_pixels = max_image_pixels
-        self._semaphore = threading.BoundedSemaphore(workers)
+        self._semaphore = _shared_render_semaphore(workers)
 
     def render(
         self, workbook: str | Path, sheet: str, cell_range: str, output: Path, metadata: dict
