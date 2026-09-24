@@ -114,10 +114,16 @@ def _render_with_libreoffice(
     soffice = str(libreoffice_path) if libreoffice_path else None
     if soffice and not Path(soffice).is_file():
         raise FileNotFoundError(f"LibreOffice executable not found: {soffice}")
+    # On Windows soffice.exe detaches and can return before the PDF exists, so the
+    # console variant soffice.com is preferred: it waits and reports a real exit code.
+    if not soffice and sys.platform == "win32":
+        soffice = shutil.which("soffice.com")
     soffice = soffice or shutil.which("soffice") or shutil.which("libreoffice")
     if not soffice:
         for candidate in (
+            r"C:\Program Files\LibreOffice\program\soffice.com",
             r"C:\Program Files\LibreOffice\program\soffice.exe",
+            r"C:\Program Files (x86)\LibreOffice\program\soffice.com",
             r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
         ):
             if Path(candidate).is_file():

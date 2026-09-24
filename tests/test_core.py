@@ -327,3 +327,14 @@ def test_model_client_attaches_viewport_image(tmp_path: Path, monkeypatch) -> No
     assert result == "ok"
     assert content[0] == {"type": "text", "text": "Describe the worksheet."}
     assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_pipeline_writes_under_a_given_run_id(tmp_path: Path) -> None:
+    config = load_config("config.example.yaml")
+    config["runtime"]["artifact_root"] = str(tmp_path)
+
+    output = ExplorationPipeline(config).run(
+        ["samples/sample.xlsx"], "Find revenue", run_id="shared"
+    )
+
+    assert output.parent == tmp_path.resolve() / "shared" / "exploration"

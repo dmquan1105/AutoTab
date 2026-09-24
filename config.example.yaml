@@ -62,9 +62,13 @@ rendering:
 
 qa:
   exploration_enabled: true
-  max_turns: 10
+  exploration_path: null
+  max_turns: 20
+  max_parse_retries: 1
+  max_context_tokens: 32000
   max_code_chars: 10000
   max_observation_chars: 20000
+  max_inline_cells: 200        # larger reads and results are shown as a preview
   sandbox:
     timeout_seconds: 10
     memory_limit_mb: 512

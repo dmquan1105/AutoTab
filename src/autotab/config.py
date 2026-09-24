@@ -56,9 +56,13 @@ DEFAULTS: dict[str, Any] = {
     },
     "qa": {
         "exploration_enabled": True,
-        "max_turns": 10,
+        "exploration_path": None,
+        "max_turns": 20,
+        "max_parse_retries": 1,
+        "max_context_tokens": 32000,
         "max_code_chars": 10000,
         "max_observation_chars": 20000,
+        "max_inline_cells": 200,
         "sandbox": {"timeout_seconds": 10, "memory_limit_mb": 512},
         "tools": {"max_range_cells": 10000},
     },
@@ -66,9 +70,13 @@ DEFAULTS: dict[str, Any] = {
 
 QA_KEYS = {
     "exploration_enabled",
+    "exploration_path",
     "max_turns",
+    "max_parse_retries",
+    "max_context_tokens",
     "max_code_chars",
     "max_observation_chars",
+    "max_inline_cells",
     "sandbox",
     "tools",
 }
@@ -158,10 +166,18 @@ def validate_config(c: dict[str, Any]) -> None:
     _reject_unknown_keys("qa.tools", qa["tools"], QA_TOOL_KEYS)
     if not isinstance(qa["exploration_enabled"], bool):
         raise ConfigError("qa.exploration_enabled must be boolean")
+    if qa["exploration_path"] is not None and not isinstance(qa["exploration_path"], str):
+        raise ConfigError("qa.exploration_path must be a path string or null")
+    if not isinstance(qa["max_parse_retries"], int) or isinstance(qa["max_parse_retries"], bool):
+        raise ConfigError("qa.max_parse_retries must be a non-negative integer")
+    if qa["max_parse_retries"] < 0:
+        raise ConfigError("qa.max_parse_retries must be a non-negative integer")
     limits = {
         "qa.max_turns": qa["max_turns"],
+        "qa.max_context_tokens": qa["max_context_tokens"],
         "qa.max_code_chars": qa["max_code_chars"],
         "qa.max_observation_chars": qa["max_observation_chars"],
+        "qa.max_inline_cells": qa["max_inline_cells"],
         "qa.sandbox.timeout_seconds": qa["sandbox"]["timeout_seconds"],
         "qa.sandbox.memory_limit_mb": qa["sandbox"]["memory_limit_mb"],
         "qa.tools.max_range_cells": qa["tools"]["max_range_cells"],

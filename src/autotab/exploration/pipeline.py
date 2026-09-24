@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import os
 from concurrent.futures import Future, ThreadPoolExecutor
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from openpyxl.utils.cell import range_boundaries
 
-from ..artifacts.store import ArtifactStore
-from ..models.client import OpenAICompatibleClient
+from ..artifacts.store import ArtifactStore, new_run_id
+from ..models.client import client_from_config
 from ..utils.ranges import viewport
 from ..utils.rendering import WindowRenderer
 from .evidence import Evidence, EvidenceExtractor
@@ -28,9 +26,16 @@ class ExplorationPipeline:
     def __init__(self, config: dict) -> None:
         self.config = config
 
-    def run(self, workbooks: list[str], query: str) -> Path:
-        timestamp = datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%f")
-        run_id = f"{timestamp}-{os.getpid()}"
+    def run(self, workbooks: list[str], query: str, run_id: str | None = None) -> Path:
+        """Explore ``workbooks`` for ``query`` and return the path of exploration.md.
+
+        Args:
+            workbooks: Source workbooks; never modified.
+            query: The user question.
+            run_id: The run folder to write into; QA passes its own so both modules
+                land in one ``<artifact_root>/<run_id>/``. A new ID when omitted.
+        """
+        run_id = run_id or new_run_id()
         store = ArtifactStore(self.config["runtime"]["artifact_root"], run_id)
         snapshots = [
             WorkbookLoader().load(p, self.config["exploration"]["include_hidden_sheets"])
@@ -38,28 +43,8 @@ class ExplorationPipeline:
         ]
         models = self.config.get("models", {})
         request_timeout = self.config["runtime"]["request_timeout_seconds"]
-        llm = (
-            OpenAICompatibleClient(
-                base_url=models["llm"]["base_url"],
-                model=models["llm"]["model"],
-                timeout=request_timeout,
-                max_tokens=int(models["llm"]["max_tokens"]),
-                extra_body=models["llm"].get("extra_body"),
-            )
-            if models.get("llm", {}).get("base_url")
-            else None
-        )
-        vlm = (
-            OpenAICompatibleClient(
-                base_url=models["vlm"]["base_url"],
-                model=models["vlm"]["model"],
-                timeout=request_timeout,
-                max_tokens=int(models["vlm"]["max_tokens"]),
-                extra_body=models["vlm"].get("extra_body"),
-            )
-            if models.get("vlm", {}).get("base_url")
-            else None
-        )
+        llm = client_from_config(models.get("llm"), request_timeout)
+        vlm = client_from_config(models.get("vlm"), request_timeout)
         keywords = KeywordExtractor(llm).extract(query)
         store.write_json("keywords.json", keywords)
         max_concurrent_findings = self.config["exploration"]["max_concurrent_findings"]
@@ -72,24 +57,18 @@ class ExplorationPipeline:
             max_image_dimension=int(rendering["max_image_dimension"]),
             max_image_pixels=int(rendering["max_image_pixels"]),
         )
+        allow_lexical_fallback = bool(
+            self.config["retrieval"].get("allow_lexical_only_fallback", False)
+        )
+        embedding = client_from_config(models.get("embedding"), request_timeout)
+        if embedding is None and not allow_lexical_fallback:
+            raise RuntimeError("An embedding provider is required for retrieval")
         retriever = HybridCellRetriever(
-            embedding=(
-                OpenAICompatibleClient(
-                    base_url=models["embedding"]["base_url"],
-                    model=models["embedding"]["model"],
-                    timeout=request_timeout,
-                )
-                if models.get("embedding", {}).get("base_url")
-                and not self.config["retrieval"].get("allow_lexical_only_fallback", False)
-                else None
-            ),
+            embedding=embedding,
             lexical_weight=self.config["retrieval"]["lexical_weight"],
             semantic_weight=self.config["retrieval"]["semantic_weight"],
+            allow_lexical_fallback=allow_lexical_fallback,
         )
-        if retriever.embedding is None and not self.config["retrieval"].get(
-            "allow_lexical_only_fallback", False
-        ):
-            raise RuntimeError("An embedding provider is required for retrieval")
         futures: list[Future[Evidence]] = []
         with ThreadPoolExecutor(max_workers=max_concurrent_findings) as executor:
             for snap in snapshots:
@@ -161,6 +140,14 @@ class ExplorationPipeline:
                 "run_id": run_id,
                 "query": query,
                 "send_query_to_vlm": self.config["exploration"]["send_query_to_vlm"],
+                "retrieval": {
+                    "semantic": embedding is not None and retriever.fallback_reason is None,
+                    "lexical_only_fallback_reason": (
+                        "no embedding provider configured"
+                        if embedding is None
+                        else retriever.fallback_reason
+                    ),
+                },
             },
         )
         return store.root / "exploration.md"

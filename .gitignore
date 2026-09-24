@@ -219,3 +219,13 @@ __marimo__/
 
 config.yaml
 outputs/
+.vscode
+
+src/autotab/qa/agent_harness.md
+src/autotab/qa/AGENT.md
+src/autotab/qa/specs
+
+SheetBrain
+.codegraph
+.claude
+CLAUDE.md
