@@ -403,3 +403,32 @@ def test_resubmitting_a_failed_answer_unchanged_is_refused(
     # The unchanged resubmission was re-asked inside the phase, never re-judged.
     assert _phases(client).count("VERIFICATION") == 2
     assert any("repeats the previous action" in prompt for prompt in client.prompts)
+
+
+def test_every_observe_and_execute_prompt_is_kept_verbatim(
+    config: dict[str, Any], scripted: Any
+) -> None:
+    client = scripted(PLAN, READ_HEADERS, RANK, _answer(), _judge())
+
+    outcome = agent.run(QUERY, [WORKBOOK], config, client=client)
+
+    prompts = outcome.run_dir / "prompts"
+    assert sorted(path.name for path in prompts.iterdir()) == [
+        "0.observe.txt",
+        "1.execute.txt",
+        "2.execute.txt",
+        "3.execute.txt",
+    ]
+    kept = [
+        (prompts / name).read_text(encoding="utf-8")
+        for name in ("0.observe.txt", "1.execute.txt", "2.execute.txt", "3.execute.txt")
+    ]
+    assert kept == client.prompts[:4]
+    events = [
+        json.loads(line)
+        for line in (outcome.run_dir / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    execute = next(e for e in events if e["phase"] == "EXECUTE")
+    assert "prompts/1.execute.txt" in execute["artifact_paths"]
+    observe = next(e for e in events if e["phase"] == "OBSERVE")
+    assert observe["artifact_paths"] == ["prompts/0.observe.txt"]

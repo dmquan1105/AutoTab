@@ -259,10 +259,14 @@ class _Run:
         if outcome.plan is not None:
             self.plan = outcome.plan
             self.state.objective = outcome.plan.execution_objective
+        # What the model saw, verbatim: the trajectory alone shows what it did, not why.
+        prompt_path = f"prompts/{self.state.turn}.observe.txt"
+        self.trace.write_text(prompt_path, outcome.prompt.text)
         self._model_event(
             Phase.OBSERVE,
             outcome.reply,
             prompt_version=PROMPT_VERSIONS["observe"],
+            artifact_paths=[prompt_path],
             observable_model_response=(
                 outcome.plan.model_dump(mode="json")
                 if outcome.plan is not None
@@ -294,7 +298,9 @@ class _Run:
         action = outcome.action
         if action is not None:
             self.last_action = action
-        paths = [f"actions/{execution_id}.json"]
+        prompt_path = f"prompts/{self.state.turn}.execute.txt"
+        self.trace.write_text(prompt_path, outcome.prompt.text)
+        paths = [f"actions/{execution_id}.json", prompt_path]
         self.trace.write_json(
             paths[0],
             {
@@ -309,8 +315,9 @@ class _Run:
             },
         )
         if isinstance(action, CodeAction):
-            paths.append(self.trace.write_text(f"code/{execution_id}.py", action.code).name)
-            paths[-1] = f"code/{execution_id}.py"
+            code_path = f"code/{execution_id}.py"
+            self.trace.write_text(code_path, action.code)
+            paths.append(code_path)
         for record in outcome.computations:
             self.computations[record.id] = record
             state = outcome.raw_result.state if outcome.raw_result else ResultState.ERROR
