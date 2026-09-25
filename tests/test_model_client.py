@@ -15,7 +15,7 @@ SECRET = "sk-or-v1-test-secret-value"
 
 class FakeResponse:
     def __init__(self, payload: dict[str, Any]) -> None:
-        self._payload = payload
+        self._body = json.dumps(payload).encode()
 
     def __enter__(self) -> Self:
         return self
@@ -23,8 +23,9 @@ class FakeResponse:
     def __exit__(self, *args: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return json.dumps(self._payload).encode()
+    def read1(self, size: int = -1) -> bytes:
+        body, self._body = self._body, b""
+        return body
 
 
 def _capture(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any]) -> dict[str, Any]:
@@ -271,3 +272,71 @@ def test_last_usage_is_kept_per_thread(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert seen == [None]
     assert client.last_usage == {"prompt_tokens": 1}
+
+
+class _StallingServer:
+    """Answers with headers, then either trickles keep-alive bytes or goes silent."""
+
+    def __init__(self, trickle: bool) -> None:
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                for _ in range(40):  # about 8 seconds, far past the client's deadline
+                    if trickle:
+                        # OpenRouter keeps a slow request alive with comment lines, so
+                        # the socket never goes quiet long enough for its timeout.
+                        self.wfile.write(b": OPENROUTER PROCESSING\n\n")
+                        self.wfile.flush()
+                    time.sleep(0.2)
+
+            def log_message(self, *args: object) -> None:
+                return None
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True  # closing must not wait for the stall to end
+        self.base_url = f"http://127.0.0.1:{self._server.server_address[1]}/v1"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+@pytest.mark.parametrize("trickle", [True, False])
+def test_a_request_never_outlives_its_timeout(trickle: bool) -> None:
+    # A real run hung for fourteen minutes on one judge call: keep-alive bytes reset the
+    # socket timeout forever. The timeout bounds the whole request, and a stall is a
+    # ModelResponseError the phase can retry, never an uncaught socket error.
+    import time
+
+    server = _StallingServer(trickle)
+    client = OpenAICompatibleClient(server.base_url, "slow-model", timeout=1)
+    started = time.monotonic()
+    try:
+        with pytest.raises(ModelResponseError, match="1s"):
+            client.complete("hello")
+        elapsed = time.monotonic() - started
+    finally:
+        server.close()
+
+    assert elapsed < 4
+
+
+def test_an_empty_or_broken_body_is_a_model_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Broken(FakeResponse):
+        def __init__(self) -> None:
+            self._body = b"<html>bad gateway</html>"
+
+    monkeypatch.setattr("autotab.models.client.urlopen", lambda request, timeout: Broken())
+
+    with pytest.raises(ModelResponseError, match="not JSON"):
+        OpenAICompatibleClient("http://localhost/v1", "m").complete("hi")

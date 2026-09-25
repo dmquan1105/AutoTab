@@ -36,70 +36,8 @@ DEFAULT_MAX_OUTPUT_CHARS = 20_000
 DEFAULT_MAX_NODES = 2_000
 DEFAULT_MAX_INLINE_CELLS = 200  # larger `result` values come back as a preview
 
-# Constructs whose cost is not bounded by the data in front of them. Rejecting them
-# statically keeps the wall-clock timeout a safety net instead of the thing that
-# decides an outcome, so a slow machine does not answer differently from a fast one.
-UNBOUNDED_NODES: dict[type[ast.AST], str] = {
-    ast.While: "while loops are not available; iterate over the data you read",
-    ast.FunctionDef: "function definitions are not available; write straight-line code",
-    ast.AsyncFunctionDef: "function definitions are not available; write straight-line code",
-    ast.Lambda: "lambdas are not available; write straight-line code",
-    ast.ClassDef: "class definitions are not available; write straight-line code",
-}
 _STARTUP_TIMEOUT_SECONDS = 60.0
 _SHUTDOWN_GRACE_SECONDS = 2.0
-
-
-# The only modules an import may name: the ones already bound in the session, so an
-# import statement grants nothing new. Models write `import pandas as pd` by habit.
-IMPORTABLE_MODULES = frozenset({"pandas", "math", "statistics", "datetime", "re", "json"})
-
-# pandas reads and writes arbitrary paths; the workbook is read through `wb` only.
-_FILE_ATTRIBUTES = frozenset(
-    {
-        "to_csv", "to_excel", "to_json", "to_parquet", "to_pickle", "to_html", "to_sql",
-        "to_clipboard", "to_feather", "to_hdf", "to_stata", "to_xml", "to_latex",
-        "to_markdown", "to_orc", "ExcelWriter", "ExcelFile", "HDFStore", "io",
-    }
-)  # fmt: skip
-
-
-def _import_refusal(node: ast.AST) -> str | None:
-    allowed = ", ".join(sorted(IMPORTABLE_MODULES))
-    if isinstance(node, ast.Import):
-        names = [alias.name for alias in node.names]
-    elif isinstance(node, ast.ImportFrom):
-        names = [node.module or ""] if node.level == 0 else ["." * node.level]
-        for alias in node.names:
-            if alias.name == "*" or _is_file_attribute(alias.name):
-                return f"from {node.module} import {alias.name} is not available"
-    else:
-        return None
-    for name in names:
-        if name not in IMPORTABLE_MODULES:
-            return (
-                f"import of {name!r} is not available; only {allowed} can be imported, and "
-                "they are already bound (pd, math, statistics, datetime, re, json)"
-            )
-    return None
-
-
-def _is_file_attribute(name: str) -> bool:
-    return name.startswith("read_") or name in _FILE_ATTRIBUTES
-
-
-def _file_access_refusal(node: ast.AST) -> str | None:
-    if isinstance(node, ast.Attribute) and _is_file_attribute(node.attr):
-        return (
-            f"file access through {node.attr!r} is not available; read the workbook with "
-            "wb.sheet(...) or wb.range(...)"
-        )
-    return None
-
-
-def _is_dunder(name: str) -> bool:
-    """Return whether a name reaches into Python's object model."""
-    return name.startswith("__") and name.endswith("__")
 
 
 def memory_limit_supported() -> bool:
@@ -302,21 +240,8 @@ class Sandbox:
                 f"the code has {len(nodes)} syntax nodes, above the limit of "
                 f"{self.max_nodes}; split the work across turns"
             )
-        for node in nodes:
-            refusal = _import_refusal(node) or _file_access_refusal(node)
-            if refusal is not None:
-                return refusal
-            refusal = UNBOUNDED_NODES.get(type(node))
-            if refusal is not None:
-                return refusal
-            if isinstance(node, ast.Attribute) and _is_dunder(node.attr):
-                # Restricted builtins alone are not a boundary: `().__class__.
-                # __bases__[0].__subclasses__()` walks from any literal to every
-                # loaded class, and from there to os. Ordinary attribute access
-                # (df.groupby) stays available.
-                return f"attribute {node.attr!r} is not available"
-            if isinstance(node, ast.Name) and _is_dunder(node.id):
-                return f"name {node.id!r} is not available"
+        # Everything else -- constructs, names, attributes, calls -- is checked by
+        # layers/code_policy.py inside the worker, against the live session namespace.
         return None
 
     def close(self, *, force: bool = False) -> None:

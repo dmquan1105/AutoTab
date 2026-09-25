@@ -363,7 +363,7 @@ def test_non_ascii_sheet_names_survive_the_worker_protocol(tmp_path: Path) -> No
     registry = ToolRegistry([WorkbookReader(WORKBOOK_ID, path)])
     with Sandbox(registry) as box:
         result = box.execute(
-            "df = wb.sheet('Doanh thu quý 1')\nresult = [list(df.columns), df['Vùng'][0]]",
+            "df = wb.sheet('Doanh thu quý 1')\nresult = [list(df.columns), df['Vùng'].iloc[0]]",
             "exec_1",
         )
 
@@ -549,3 +549,286 @@ def test_the_facade_names_the_sheet_argument_like_every_tool(sandbox: Sandbox) -
 
     assert keyword.state is ResultState.SUCCESS, keyword.error
     assert keyword.result == positional.result == 2
+
+
+# --- allowlist policy: only listed constructs, names, and attributes run --------------
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "try:\n    x = 1\nexcept Exception:\n    x = 2",
+        "with wb as w:\n    x = 1",
+        "x = 1\ndel x",
+        "global x",
+        "result = (y := 3)",
+        "assert 1 == 1",
+        "raise ValueError('x')",
+        "x = [v async for v in range(3)]",
+    ],
+)
+def test_constructs_outside_the_allowlist_are_refused(sandbox: Sandbox, code: str) -> None:
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert "not available" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "result = wb._registry",
+        "result = pd.eval('1 + 1')",
+        "pd.set_option('display.max_rows', 5)",
+        "result = statistics.sys",
+        "result = re.functools",
+        "result = wb.sheet('Revenue').query('Amount > 1')",
+        "result = wb.sheet('Revenue').eval('Amount + 1')",
+        "wb.sheet('Revenue').plot()",
+        "result = '{0.__class__}'.format(1)",
+        "template = '{0.real}'\nresult = template.format(1)",
+        "result = wb.sheet('Revenue').values.ctypes",
+        "result = wb.sheet('Revenue').to_sql('t', None)",
+        "result = wb.cells('A1')",
+    ],
+)
+def test_attributes_outside_the_allowlist_are_refused(sandbox: Sandbox, code: str) -> None:
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert "not available" in (result.error or ""), result.error
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("sum = 0", "rebind"),
+        ("pd = 1", "rebind"),
+        ("wb = None", "rebind"),
+        ("from datetime import datetime", "rebind"),
+        ("import math as pd", "rebind"),
+        ("p = pd", "module"),
+        ("result = [math][0]", "module"),
+        ("g = wb.sheet\nresult = g('Revenue')", "call"),
+        ("result = [len][0]([1])", "call"),
+        ("pd.read_x = 1", "not available"),
+    ],
+)
+def test_names_and_calls_outside_the_allowlist_are_refused(
+    sandbox: Sandbox, code: str, expected: str
+) -> None:
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert expected in (result.error or ""), result.error
+
+
+def test_a_module_imported_on_an_earlier_turn_keeps_its_allowlist(sandbox: Sandbox) -> None:
+    sandbox.execute("import datetime as dt", "e1")
+
+    used = sandbox.execute("result = str(dt.date(2020, 1, 2))", "e2")
+    aliased = sandbox.execute("d = dt", "e3")
+
+    assert used.result == "2020-01-02", used.error
+    assert aliased.state is ResultState.ERROR and "module" in (aliased.error or "")
+
+
+def test_an_undefined_name_is_refused_before_anything_runs(sandbox: Sandbox) -> None:
+    # Refusing up front means a half-run snippet never leaves a partial namespace.
+    refused = sandbox.execute("marker = 5\nresult = markr + 1", "e1")
+    after = sandbox.execute("result = marker", "e2")
+
+    assert refused.state is ResultState.ERROR
+    assert "NameError" in (refused.error or "") and "markr" in (refused.error or "")
+    assert after.state is ResultState.ERROR and "marker" in (after.error or "")
+
+
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        ("df = wb.sheet(name='Revenue')", "name"),
+        ("record_computation('max', ['Revenue!B2:B3'])", "output"),
+        ("x = math.floor(1.5, 2)", "argument"),
+    ],
+)
+def test_calls_that_cannot_bind_their_arguments_are_refused(
+    sandbox: Sandbox, code: str, expected: str
+) -> None:
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert expected in (result.error or ""), result.error
+
+
+def test_everyday_analysis_code_still_runs(sandbox: Sandbox) -> None:
+    code = (
+        "import pandas as pd\n"
+        "from datetime import date\n"
+        "df = wb.sheet('Revenue')\n"
+        "df.columns = ['region', 'amount']\n"
+        "df['amount'] = pd.to_numeric(df['amount'])\n"
+        "top = df[df['amount'] == df['amount'].max()]\n"
+        "names = [str(v).upper() for v in top['region'].tolist()]\n"
+        "for i, v in enumerate(names):\n"
+        "    if v:\n"
+        "        label = f'{i}:{v}'\n"
+        "calc = record_computation('max', ['Revenue!B2:B3'], 50)\n"
+        "print('{} {:.1f}'.format(label, 1.0))\n"
+        "result = {'names': names, 'calc': calc, 'day': str(date(2020, 1, 2))}"
+    )
+
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.SUCCESS, result.error
+    assert result.result == {"names": ["NORTH"], "calc": "calc_1", "day": "2020-01-02"}
+
+
+@pytest.mark.parametrize("name", ["type", "dir", "vars", "getattr", "repr"])
+def test_refused_introspection_says_how_to_look_instead(sandbox: Sandbox, name: str) -> None:
+    # A real run spent turns guessing at a value's shape after `type(x)` was refused.
+    result = sandbox.execute(f"x = [1]\nprint({name}(x))", "e1")
+
+    assert result.state is ResultState.ERROR
+    assert "print(x)" in (result.error or "") and "isinstance" in (result.error or "")
+
+
+def test_numpy_and_pandas_numbers_can_be_recorded(sandbox: Sandbox) -> None:
+    # A pandas max is a numpy scalar; refusing it cost a real run a whole turn.
+    result = sandbox.execute(
+        "top = wb.sheet('Revenue')['Amount'].max()\n"
+        "result = record_computation('max', ['Revenue!B2:B3'], top)",
+        "e1",
+    )
+
+    assert result.state is ResultState.SUCCESS, result.error
+    assert result.result == "calc_1"
+
+
+def test_a_sheet_frame_is_indexed_by_worksheet_row(sandbox: Sandbox) -> None:
+    # Row positions never need converting: df.loc[n] is worksheet row n. A real run
+    # named the wrong person after an off-by-two conversion from positions to rows.
+    code = (
+        "df = wb.sheet('Revenue')\n"
+        "raw = wb.sheet('Revenue', header_row=None)\n"
+        "result = {\n"
+        "    'rows': [int(r) for r in df.index],\n"
+        "    'raw_rows': [int(r) for r in raw.index],\n"
+        "    'row_3': str(df.loc[3, 'Region']),\n"
+        "    'where_50': [int(r) for r in df.index[df['Amount'] == 50]],\n"
+        "}"
+    )
+
+    result = sandbox.execute(code, "e1")
+
+    assert result.state is ResultState.SUCCESS, result.error
+    assert result.result == {
+        "rows": [2, 3],
+        "raw_rows": [1, 2, 3],
+        "row_3": "South",
+        "where_50": [2],
+    }
+
+
+def test_returned_frames_series_and_indexes_keep_their_worksheet_rows(
+    sandbox: Sandbox,
+) -> None:
+    frame = sandbox.execute("df = wb.sheet('Revenue')\nresult = df[df['Amount'] == 50]", "e1")
+    series = sandbox.execute("result = df['Amount'][df['Amount'] == 40]", "e2")
+    index = sandbox.execute("result = df.index[df['Amount'] == 40]", "e3")
+
+    assert frame.result == {"index": [2], "columns": ["Region", "Amount"], "rows": [["North", 50]]}
+    assert series.result == {"index": [3], "values": [40]}
+    assert index.result == [3]
+
+
+# --- rows_where: a row selection is recorded and replayable ----------------------------
+
+
+def test_a_row_selection_is_recorded_with_its_resolved_condition(ledger: Sandbox) -> None:
+    # Which rows meet a condition -- ties, "only", "all that" -- is a claim like any
+    # other, so it must be replayable; stdout alone proves nothing.
+    result = ledger.execute(
+        "top = record_computation('max', ['Ledger!B2:B5'], 50)\n"
+        "result = record_computation('rows_where', ['Ledger!B2:B5'], [2], "
+        "condition={'equals': top})",
+        "e1",
+    )
+
+    assert result.state is ResultState.SUCCESS, result.error
+    record = ledger.computations["calc_2"]
+    assert record.operation == "rows_where"
+    assert record.output == [2]
+    assert record.metadata["condition"] == {"op": "equals", "value": 50, "source": "calc_1"}
+    # The blank B4 is skipped, so it can never match.
+    assert [item.reference for item in record.inputs] == ["Ledger!B2", "Ledger!B3", "Ledger!B5"]
+
+
+@pytest.mark.parametrize(
+    ("code", "message"),
+    [
+        ("record_computation('rows_where', ['Ledger!B2:B5'], [2])", "condition"),
+        ("record_computation('rows_where', ['Ledger!B2:B5'], [2], condition={'near': 5})", "near"),
+        (
+            (
+                "record_computation('rows_where', ['Ledger!B2:B5'], [2], "
+                "condition={'equals': 5, 'gt': 1})"
+            ),
+            "one",
+        ),
+        ("record_computation('rows_where', ['Ledger!A2:B5'], [2], condition={'gt': 1})", "column"),
+        ("record_computation('rows_where', ['Ledger!B2:B5'], 'row 2', condition={'gt': 1})", "row"),
+        ("record_computation('max', ['Ledger!B2:B5'], 50, condition={'gt': 1})", "rows_where"),
+    ],
+)
+def test_a_malformed_row_selection_is_refused(ledger: Sandbox, code: str, message: str) -> None:
+    result = ledger.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert message in (result.error or ""), result.error
+
+
+def test_numpy_row_numbers_are_accepted(ledger: Sandbox) -> None:
+    code = (
+        "df = wb.sheet('Ledger')\n"
+        "rows = df.index[df['Amount'] > 20]\n"
+        "result = record_computation('rows_where', ['Ledger!B2:B5'], list(rows), "
+        "condition={'gt': 20})"
+    )
+
+    result = ledger.execute(code, "e1")
+
+    assert result.state is ResultState.SUCCESS, result.error
+    assert ledger.computations["calc_1"].output == [2, 3]
+
+
+def test_a_selection_cannot_compare_against_another_selection(ledger: Sandbox) -> None:
+    # A real run compared a column with an earlier row list: "equals [13]" matched
+    # nothing, and the step failed on replay instead of being refused up front.
+    code = (
+        "rows = record_computation('rows_where', ['Ledger!B2:B5'], [2], "
+        "condition={'equals': 50})\n"
+        "record_computation('rows_where', ['Ledger!B2:B5'], [2], condition={'equals': rows})"
+    )
+
+    result = ledger.execute(code, "e1")
+
+    assert result.state is ResultState.ERROR
+    assert "single value" in (result.error or "")
+
+
+@pytest.mark.parametrize(
+    ("given", "canonical"),
+    [("eq", "equals"), ("==", "equals"), ("ne", "not_equals"), (">=", "ge"), ("<", "lt")],
+)
+def test_common_condition_spellings_are_understood(
+    ledger: Sandbox, given: str, canonical: str
+) -> None:
+    # A real run lost a turn to condition={'eq': ...}.
+    result = ledger.execute(
+        "result = record_computation('rows_where', ['Ledger!B2:B5'], [], "
+        f"condition={{{given!r}: 1000}})",
+        "e1",
+    )
+
+    assert result.state is ResultState.SUCCESS, result.error
+    assert ledger.computations["calc_1"].metadata["condition"]["op"] == canonical

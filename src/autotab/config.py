@@ -64,7 +64,7 @@ DEFAULTS: dict[str, Any] = {
         "max_observation_chars": 20000,
         "max_inline_cells": 200,
         "sandbox": {"timeout_seconds": 10, "memory_limit_mb": 512},
-        "tools": {"max_range_cells": 10000},
+        "tools": {"max_range_cells": 10000, "max_read_cells": 200},
     },
 }
 
@@ -81,7 +81,7 @@ QA_KEYS = {
     "tools",
 }
 QA_SANDBOX_KEYS = {"timeout_seconds", "memory_limit_mb"}
-QA_TOOL_KEYS = {"max_range_cells"}
+QA_TOOL_KEYS = {"max_range_cells", "max_read_cells"}
 
 
 def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -181,6 +181,7 @@ def validate_config(c: dict[str, Any]) -> None:
         "qa.sandbox.timeout_seconds": qa["sandbox"]["timeout_seconds"],
         "qa.sandbox.memory_limit_mb": qa["sandbox"]["memory_limit_mb"],
         "qa.tools.max_range_cells": qa["tools"]["max_range_cells"],
+        "qa.tools.max_read_cells": qa["tools"]["max_read_cells"],
     }
     for name, value in limits.items():
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:

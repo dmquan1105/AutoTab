@@ -160,6 +160,7 @@ def test_strict_python_validation_rejects_coercion_and_non_json_values() -> None
                 "known_facts": ("fact",),
                 "uncertainties": [],
                 "execution_objective": "Inspect values.",
+                "next_action": "tool",
                 "rationale": "Values are missing.",
             }
         )
@@ -270,6 +271,7 @@ def test_observe_result_is_exact() -> None:
         "known_facts": ["Revenue is on the Revenue sheet."],
         "uncertainties": ["The exact range is unknown."],
         "execution_objective": "Confirm values under the selected header.",
+        "next_action": "tool",
         "rationale": "The range must be verified.",
     }
 
@@ -277,6 +279,13 @@ def test_observe_result_is_exact() -> None:
 
     with pytest.raises(ValidationError):
         _validate_json(ObserveResult, {**payload, "tool_name": "inspect_range"})
+    # The plan names the kind of the next action, and nothing else can run.
+    for kind in ("tool", "code", "answer"):
+        assert _validate_json(ObserveResult, {**payload, "next_action": kind})
+    with pytest.raises(ValidationError):
+        _validate_json(ObserveResult, {**payload, "next_action": "search"})
+    with pytest.raises(ValidationError):
+        _validate_json(ObserveResult, {k: v for k, v in payload.items() if k != "next_action"})
 
 
 def test_agent_action_discriminates_all_three_types() -> None:
@@ -694,6 +703,7 @@ def test_unknown_and_extra_fields_are_rejected() -> None:
                 "known_facts": [],
                 "uncertainties": [],
                 "execution_objective": "Confirm the header.",
+                "next_action": "tool",
                 "rationale": "The header is unconfirmed.",
             },
         ),

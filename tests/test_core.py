@@ -64,6 +64,18 @@ def test_invalid_render_workers(tmp_path: Path) -> None:
         raise AssertionError("non-positive render concurrency should be rejected")
 
 
+def test_tool_read_limit_defaults_and_is_validated(tmp_path: Path) -> None:
+    assert load_config("does-not-exist.yaml")["qa"]["tools"]["max_read_cells"] == 200
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("qa:\n  tools:\n    max_read_cells: 0\n", encoding="utf-8")
+    try:
+        load_config(config_path)
+    except ConfigError as exc:
+        assert "qa.tools.max_read_cells" in str(exc)
+    else:
+        raise AssertionError("a non-positive tool read limit should be rejected")
+
+
 def test_keywords_fallback() -> None:
     assert normalize_phrase("  Revenue   By Region ") == "revenue by region"
     values = KeywordExtractor().extract("Find revenue by region")
@@ -310,8 +322,11 @@ def test_model_client_attaches_viewport_image(tmp_path: Path, monkeypatch) -> No
         def __exit__(self, *args: object) -> None:
             return None
 
-        def read(self) -> bytes:
-            return b'{"choices": [{"message": {"content": "ok"}}]}'
+        body = b'{"choices": [{"message": {"content": "ok"}}]}'
+
+        def read1(self, size: int = -1) -> bytes:
+            body, self.body = self.body, b""
+            return body
 
     def fake_urlopen(request: Request, timeout: float) -> FakeResponse:
         captured.update(json.loads(request.data.decode()))

@@ -22,7 +22,7 @@ TERMINAL_PHASES = frozenset({"FINALIZE", "FAIL"})
 TRANSITIONS: dict[str, frozenset[str]] = {
     "INITIALIZE": frozenset({"OBSERVE", "FAIL"}),
     "OBSERVE": frozenset({"EXECUTE", "FAIL"}),
-    "EXECUTE": frozenset({"EXECUTE", "VERIFY", "FAIL"}),
+    "EXECUTE": frozenset({"VERIFY", "OBSERVE", "FAIL"}),
     "VERIFY": frozenset({"OBSERVE", "FINALIZE", "FAIL"}),
     "FINALIZE": frozenset(),
     "FAIL": frozenset(),
@@ -35,9 +35,10 @@ def can_transition(current: str, target: str, *, action_type: str | None = None)
     Args:
         current: Phase the run is leaving.
         target: Phase the run would enter.
-        action_type: Action the EXECUTE phase dispatched, when leaving EXECUTE.
-            Verification is reachable only from an ``answer`` action, and only a
-            data-gathering action may chain into another EXECUTE turn.
+        action_type: The action of the turn, when leaving EXECUTE or VERIFY. Every
+            valid action is verified; an EXECUTE that produced no valid action returns
+            to OBSERVE, since there is nothing to verify; and only a verified
+            ``answer`` can finalize.
 
     Returns:
         True when the transition is legal.
@@ -45,9 +46,11 @@ def can_transition(current: str, target: str, *, action_type: str | None = None)
     if target not in TRANSITIONS.get(current, frozenset()):
         return False
     if current == "EXECUTE" and target == "VERIFY":
+        return action_type in {"tool", "code", "answer"}
+    if current == "EXECUTE" and target == "OBSERVE":
+        return action_type is None
+    if current == "VERIFY" and target == "FINALIZE":
         return action_type == "answer"
-    if current == "EXECUTE" and target == "EXECUTE":
-        return action_type in {"tool", "code"}
     return True
 
 

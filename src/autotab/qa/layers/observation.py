@@ -317,16 +317,37 @@ def normalize_tool(
     )
 
 
-def normalize_sandbox(result: SandboxResult, *, max_chars: int = DEFAULT_MAX_CHARS) -> Observation:
-    """Normalize one sandbox run; every value it produced is agent-computed."""
+def normalize_sandbox(
+    result: SandboxResult, *, max_chars: int = DEFAULT_MAX_CHARS, code_path: str | None = None
+) -> Observation:
+    """Normalize one sandbox run; every value it produced is agent-computed.
+
+    ``code_path`` is where the run's trace keeps the code, cited as provenance.
+    """
     summary = f"code run {result.execution_id}"
     provenance = [
-        ProvenanceReference(
-            kind=ProvenanceKind.ARTIFACT, artifact_path=f"code/{result.execution_id}.py"
+        *(
+            [ProvenanceReference(kind=ProvenanceKind.ARTIFACT, artifact_path=code_path)]
+            if code_path
+            else []
         ),
         *(
             ProvenanceReference(kind=ProvenanceKind.COMPUTATION, computation_id=computation_id)
             for computation_id in result.computation_ids
+        ),
+        # Ranges the code read through wb, so an answer citing them can find this turn.
+        *(
+            ProvenanceReference(
+                kind=ProvenanceKind.WORKBOOK,
+                workbook_id=str(call["workbook_id"]),
+                sheet=str(call["sheet_name"]),
+                range_ref=str(call["range_ref"]),
+            )
+            for call in result.facade_calls
+            if call.get("method") in ("range", "attributes")
+            and call.get("workbook_id")
+            and call.get("sheet_name")
+            and call.get("range_ref")
         ),
     ]
     reads = [

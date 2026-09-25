@@ -13,11 +13,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from openpyxl.utils.cell import range_boundaries
+
 from ..prompts import (
     EXECUTE_INSTRUCTIONS,
     OBSERVE_AFTER_FAILURE,
     OBSERVE_INSTRUCTIONS,
+    PLANNED_EXECUTE_INSTRUCTIONS,
     SANDBOX_CAPABILITIES,
+    STEP_VERIFICATION_INSTRUCTIONS,
     SYSTEM_INVARIANTS,
     VERIFICATION_INSTRUCTIONS,
     format_tool_descriptions,
@@ -32,6 +36,7 @@ from ..schemas import (
     ComputationRecord,
     DeterministicCheckReport,
     FeedbackPriority,
+    FeedbackSource,
     ImprovementFeedback,
     LLMJudgeResult,
     Observation,
@@ -39,12 +44,13 @@ from ..schemas import (
     Phase,
     RunStatus,
 )
-from .verification import feedback_for, is_not_applicable
+from .verification import feedback_for, is_not_applicable, parse_citation
 
 CHARS_PER_TOKEN = 4
 TOKEN_COUNTER = f"chars_per_token:{CHARS_PER_TOKEN}"
 # Kept free while choosing optional content, so the omission note always fits.
 _NOTE_RESERVE_TOKENS = 120
+_NOTE_ITEMS = 4  # omitted items named in the note; the rest are counted
 
 
 class ContextBudgetError(ValueError):
@@ -74,7 +80,8 @@ class ContextRequest:
     query: str
     workbooks: Sequence[Mapping[str, Any]]
     budget_tokens: int
-    output_schema: Mapping[str, Any]
+    # None when the reply is not JSON, as for a planned code step.
+    output_schema: Mapping[str, Any] | None
     exploration: Sequence[Observation] = ()
     steps: Sequence[Step] = ()
     plan: ObserveResult | None = None
@@ -82,6 +89,11 @@ class ContextRequest:
     after_failure: bool = False
     tool_descriptions: Sequence[Mapping[str, Any]] = ()
     sandbox_names: Sequence[str] = ()
+    tool_read_cells: int | None = None
+    # For an answer's judge: each citation's cells as the harness read them.
+    cited_cells: Mapping[str, Sequence[tuple[str, Any]]] = field(default_factory=dict)
+    # For OBSERVE: why the last EXECUTE produced no valid action, if it did not.
+    rejected_execute: str | None = None
     candidate: CandidateAnswer | None = None
     report: DeterministicCheckReport | None = None
     computations: Mapping[str, ComputationRecord] = field(default_factory=dict)
@@ -103,8 +115,66 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
+def _span(rows: Sequence[int]) -> str:
+    return f"{rows[0]}-{rows[-1]}" if rows[0] != rows[-1] else str(rows[0])
+
+
+def _column(profile: Mapping[str, Any]) -> str:
+    counts = profile.get("counts") or {}
+    kinds = ", ".join(f"{count} {kind}" for kind, count in counts.items())
+    parts = [f"{profile.get('filled', 0)} filled" + (f" ({kinds})" if kinds else "")]
+    for key in ("numbers", "dates"):
+        spread = profile.get(key)
+        if spread:
+            parts.append(f"{key} {spread['min']}..{spread['max']} in rows {_span(spread['rows'])}")
+    formulas = int(profile.get("formulas") or 0)
+    if formulas:
+        parts.append(f"{formulas} formula" + ("s" if formulas > 1 else ""))
+    text = profile.get("text") or []
+    if text:
+        cells = ", ".join(
+            f"{coordinate} {json.dumps(value, ensure_ascii=False)}" for coordinate, value in text
+        )
+        parts.append(f"text {cells}")
+    return f"    - {profile.get('column')}: " + "; ".join(parts)
+
+
+def _window(window: Mapping[str, Any]) -> list[str]:
+    rows = window.get("rows") or []
+    if not rows:
+        return []
+    lines = ["    top-left cells, verbatim:", "      row | " + " | ".join(window["columns"])]
+    for row, values in rows:
+        shown = ["" if value is None else str(value) for value in values]
+        lines.append(f"      {row} | " + " | ".join(shown))
+    return lines
+
+
+def _structure(structure: Mapping[str, Any]) -> list[str]:
+    lines = _window(structure.get("window") or {})
+    lines.append("    cells by column:")
+    lines.extend(_column(profile) for profile in structure.get("columns") or [])
+    more = int(structure.get("more_columns") or 0)
+    if more:
+        lines.append(f"    - ... {more} more columns, not profiled")
+    for key, label in (("total_rows", "rows with total/sum text"), ("blank_rows", "blank rows")):
+        rows = structure.get(key) or []
+        if rows:
+            lines.append(f"    {label}: {', '.join(str(row) for row in rows)}")
+    return lines
+
+
+_STRUCTURE_NOTE = (
+    "The top-left cells are shown exactly as they are, blank rows skipped and long text "
+    "cut; the column profile is computed from every cell of each used range and is exact. "
+    "Neither says what anything means: decide which cells are labels and where each table "
+    "starts from the cells themselves, reading more when unsure."
+)
+
+
 def _workbooks(workbooks: Sequence[Mapping[str, Any]]) -> str:
     lines = ["Workbooks:"]
+    profiled = False
     for book in workbooks:
         lines.append(f"- {book.get('workbook_id')} ({book.get('file')})")
         for sheet in book.get("sheets") or []:
@@ -113,6 +183,11 @@ def _workbooks(workbooks: Sequence[Mapping[str, Any]]) -> str:
             lines.append(
                 f"  - sheet {sheet.get('name')!r}, used range {sheet.get('dimensions')}{extra}"
             )
+            if sheet.get("structure"):
+                profiled = True
+                lines.extend(_structure(sheet["structure"]))
+    if profiled:
+        lines.append(_STRUCTURE_NOTE)
     return "\n".join(lines)
 
 
@@ -147,15 +222,9 @@ def _action_line(action: AgentAction, compact: bool) -> str:
     return f"tool {action.tool_name} {_json(action.arguments)}"
 
 
-def _step(step: Step, compact: bool) -> str:
-    observation = step.observation
-    head = f"Turn {step.turn} ({step.execution_id}): {_action_line(step.action, compact)}"
-    if compact:
-        return (
-            f"{head} -> {observation.status.value}; details omitted to fit the budget "
-            f"(actions/{step.execution_id}.json)"
-        )
-    lines = [head, f"Result: {observation.status.value} - {observation.summary}"]
+def render_observation(observation: Observation) -> str:
+    """The observation exactly as a later prompt shows it."""
+    lines = [f"Result: {observation.status.value} - {observation.summary}"]
     if observation.error:
         lines.append(f"  error: {observation.error}")
     lines.extend(f"  - {fact}" for fact in observation.facts)
@@ -163,6 +232,64 @@ def _step(step: Step, compact: bool) -> str:
     if observation.next_question:
         lines.append(f"  next question: {observation.next_question}")
     return "\n".join(lines)
+
+
+_DIGEST_CHARS = 200
+
+
+def _step(step: Step, compact: bool) -> str:
+    """A turn whole, or as its one-line digest: action, status, and what it came to."""
+    observation = step.observation
+    head = f"Turn {step.turn} ({step.execution_id}): {_action_line(step.action, compact)}"
+    if compact:
+        outcome = observation.error or next(
+            (fact for fact in observation.facts if fact.startswith("result")),
+            None,
+        )
+        if outcome is None:
+            # A read's digest keeps the start of what it returned, so it is not re-read.
+            read = " / ".join(observation.facts)
+            outcome = f"{observation.summary}: {read}" if read else observation.summary
+        if len(outcome) > _DIGEST_CHARS:
+            outcome = outcome[: _DIGEST_CHARS - 1] + "…"
+        return f"{head} -> {observation.status.value}: {outcome}"
+    return f"{head}\n{render_observation(observation)}"
+
+
+def _supports(step: Step, candidate: CandidateAnswer) -> bool:
+    """Whether a turn produced evidence the answer cites: a cited range or computation."""
+    cited_ids = {claim.computation_id for claim in candidate.claims if claim.computation_id}
+    cited = [
+        parsed
+        for claim in candidate.claims
+        for citation in claim.citations
+        if (parsed := parse_citation(citation)) is not None
+    ]
+    for reference in step.observation.provenance:
+        if reference.computation_id in cited_ids:
+            return True
+        sheet, range_ref = reference.sheet, reference.range_ref
+        if sheet and range_ref and any(s == sheet and _overlaps(r, range_ref) for s, r in cited):
+            return True
+    return False
+
+
+def _box(range_ref: str) -> tuple[int, int, int, int] | None:
+    """(min_col, min_row, max_col, max_row), or None for an open or invalid range."""
+    try:
+        min_col, min_row, max_col, max_row = range_boundaries(range_ref.upper())
+    except (ValueError, TypeError):
+        return None
+    if min_col is None or min_row is None or max_col is None or max_row is None:
+        return None
+    return min_col, min_row, max_col, max_row
+
+
+def _overlaps(first: str, second: str) -> bool:
+    a, b = _box(first), _box(second)
+    if a is None or b is None:  # a whole row or column: treat as touching everything
+        return True
+    return a[0] <= b[2] and b[0] <= a[2] and a[1] <= b[3] and b[1] <= a[3]
 
 
 def _plan(plan: ObserveResult) -> str:
@@ -173,6 +300,7 @@ def _plan(plan: ObserveResult) -> str:
     if plan.uncertainties:
         lines.append("Uncertainties:")
         lines.extend(f"- {note}" for note in plan.uncertainties)
+    lines.append(f"Next action: {plan.next_action.value}")
     lines.append(f"Rationale: {plan.rationale}")
     return "\n".join(lines)
 
@@ -188,21 +316,38 @@ def _feedback(items: Sequence[ImprovementFeedback], title: str) -> str:
     return "\n".join(lines)
 
 
+def _blocking_feedback(items: Sequence[ImprovementFeedback]) -> str:
+    """Blocking items, the exact checks first: where advice conflicts, a check wins."""
+    checks = [item for item in items if item.source is not FeedbackSource.LLM_JUDGE]
+    judged = [item for item in items if item.source is FeedbackSource.LLM_JUDGE]
+    parts = ["Blocking feedback (must be resolved before the answer can pass):"]
+    if checks:
+        parts.append(
+            _feedback(
+                checks,
+                "Failed checks (exact; their repairs are right, and where a judge's "
+                "recommendation conflicts with one, follow the check):",
+            )
+        )
+    if judged:
+        parts.append(_feedback(judged, "Judge findings:"))
+    return "\n".join(parts)
+
+
 def _report(report: DeterministicCheckReport) -> str:
     lines = [f"Deterministic checks: {report.status.value}"]
     lines.extend(f"- {c.id}: {c.status.value} - {c.reason}" for c in report.checks)
     return "\n".join(lines)
 
 
-def _provenance(candidate: CandidateAnswer, computations: Mapping[str, Any]) -> str:
-    """Where each computation the answer relies on came from.
+def _provenance(ids: Sequence[str], computations: Mapping[str, Any], title: str) -> str:
+    """Where each computation under review came from.
 
-    With large tables shown only as previews, this is how the judge checks coverage:
-    a computation's sources and input count say exactly which cells it used.
+    With large tables shown only as previews, this is how a judge checks coverage: a
+    computation's sources and input count say exactly which cells it used.
     """
     lines = []
-    cited = dict.fromkeys(str(c.computation_id) for c in candidate.claims if c.computation_id)
-    for computation_id in cited:
+    for computation_id in dict.fromkeys(ids):
         record = computations.get(computation_id)
         if record is None:
             continue
@@ -213,13 +358,60 @@ def _provenance(candidate: CandidateAnswer, computations: Mapping[str, Any]) -> 
         origin = ", ".join(str(source) for source in sources) if sources else "declared inputs"
         skipped = record.metadata.get("skipped_blank") or []
         blanks = f"; {len(skipped)} blank skipped" if isinstance(skipped, list) and skipped else ""
+        condition = record.metadata.get("condition")
+        where = (
+            f" where value {condition.get('op')} {condition.get('value')!r} "
+            f"({condition.get('source')})"
+            if isinstance(condition, dict)
+            else ""
+        )
         lines.append(
-            f"- {record.id}: {record.operation} over {origin} -> {len(inputs)} inputs "
+            f"- {record.id}: {record.operation} over {origin}{where} -> {len(inputs)} inputs "
             f"({span}){blanks}; output {record.output!r}"
         )
     if not lines:
         return ""
-    return "Recorded computations the answer relies on:\n" + "\n".join(lines)
+    return title + "\n" + "\n".join(lines)
+
+
+def _review_provenance(request: ContextRequest) -> str:
+    """The computations a verification judges: the answer's cited ones, or the step's."""
+    if request.phase is not Phase.VERIFY:
+        return ""
+    if request.candidate is not None:
+        cited = [str(c.computation_id) for c in request.candidate.claims if c.computation_id]
+        title = "Recorded computations the answer relies on:"
+        return _provenance(cited, request.computations, title)
+    return _provenance(
+        list(request.computations), request.computations, "Recorded computations of this step:"
+    )
+
+
+_CITED_INLINE = 12
+_CITED_ENDS = 3
+_MAX_CITATIONS = 20
+
+
+def _cited(cited: Mapping[str, Sequence[tuple[str, Any]]]) -> str:
+    """Each citation's cells as the harness read them, both ends of a long range."""
+    if not cited:
+        return ""
+
+    def cell(coordinate: str, value: Any) -> str:
+        return f"{coordinate} = {json.dumps(value, ensure_ascii=False, default=str)}"
+
+    lines = ["Cited cells, read by the harness from the workbook:"]
+    for citation in list(cited)[:_MAX_CITATIONS]:
+        cells = list(cited[citation])
+        if len(cells) <= _CITED_INLINE:
+            shown = ", ".join(cell(c, v) for c, v in cells)
+            lines.append(f"- {citation}: {shown}")
+            continue
+        filled = sum(1 for _, value in cells if value is not None)
+        head = ", ".join(cell(c, v) for c, v in cells[:_CITED_ENDS])
+        tail = ", ".join(cell(c, v) for c, v in cells[-_CITED_ENDS:])
+        lines.append(f"- {citation}: {len(cells)} cells, {filled} filled; {head}, …, {tail}")
+    return "\n".join(lines)
 
 
 def _candidate(candidate: CandidateAnswer) -> str:
@@ -232,11 +424,18 @@ def _candidate(candidate: CandidateAnswer) -> str:
 
 def _capabilities(request: ContextRequest) -> str:
     if request.phase is Phase.EXECUTE:
+        kind = request.plan.next_action.value if request.plan is not None else None
+        if kind == "answer":
+            return ""
+        if kind == "tool":
+            return format_tool_descriptions(request.tool_descriptions)
         bound = (
             f"Currently bound in the session: {', '.join(request.sandbox_names)}"
             if request.sandbox_names
             else "Nothing is bound in the session yet."
         )
+        if kind == "code":
+            return f"{SANDBOX_CAPABILITIES}\n\n{bound}"
         return "\n\n".join(
             [format_tool_descriptions(request.tool_descriptions), SANDBOX_CAPABILITIES, bound]
         )
@@ -246,6 +445,12 @@ def _capabilities(request: ContextRequest) -> str:
             "Capabilities of the next step (chosen there, not here): read-only workbook "
             f"tools ({names or 'none'}), a persistent Python session with pandas and a "
             "read-only workbook object, and answering with grounded claims."
+            + (
+                f" A tool read returns at most {request.tool_read_cells} cells; a larger "
+                "range must be a code step."
+                if request.tool_read_cells is not None
+                else ""
+            )
         )
     return ""
 
@@ -258,7 +463,16 @@ def _instructions(request: ContextRequest) -> str:
             else OBSERVE_INSTRUCTIONS
         )
     if request.phase is Phase.EXECUTE:
-        return EXECUTE_INSTRUCTIONS
+        if request.plan is None:
+            return EXECUTE_INSTRUCTIONS
+        kind = request.plan.next_action.value
+        return (
+            f"{PLANNED_EXECUTE_INSTRUCTIONS[kind]}\n\n"
+            f'The plan asks for one "{kind}" action; take exactly that action toward the '
+            "objective."
+        )
+    if request.candidate is None:
+        return STEP_VERIFICATION_INSTRUCTIONS
     return f"{VERIFICATION_INSTRUCTIONS}\n\n{rubric_text()}"
 
 
@@ -296,15 +510,32 @@ def assemble_context(request: ContextRequest) -> AssembledPrompt:
         "question": f"Question (verbatim):\n{request.query}",
         "workbooks": _workbooks(request.workbooks),
         "candidate": _candidate(request.candidate) if request.candidate else "",
-        "provenance": (
-            _provenance(request.candidate, request.computations)
-            if request.candidate and request.phase is Phase.VERIFY
+        "provenance": _review_provenance(request),
+        # A step verification judges the latest step, so it is shown whole.
+        "under_review": (
+            "Step under review:\n" + _step(request.steps[-1], False)
+            if request.phase is Phase.VERIFY and request.candidate is None and request.steps
             else ""
         ),
         "report": _report(request.report) if request.report else "",
+        "cited": (
+            _cited(request.cited_cells)
+            if request.phase is Phase.VERIFY and request.candidate
+            else ""
+        ),
+        "rejected": (
+            "The last EXECUTE produced no valid action, so nothing ran: "
+            f"{request.rejected_execute}\nPlan in light of it -- for example, if it tried "
+            "another kind of action than planned, consider whether that kind is the right "
+            "next step."
+            if request.phase is Phase.OBSERVE and request.rejected_execute
+            else ""
+        ),
         "capabilities": _capabilities(request),
         "instructions": _instructions(request),
-        "schema": output_schema(request.output_schema),
+        "schema": (
+            output_schema(request.output_schema) if request.output_schema is not None else ""
+        ),
     }
     for text in reserved.values():
         budget.take(text)
@@ -321,8 +552,7 @@ def assemble_context(request: ContextRequest) -> AssembledPrompt:
     blocking = [item for item in feedback if item.priority is FeedbackPriority.BLOCKING]
     blocking_text = ""
     if blocking:
-        title = "Blocking feedback (must be resolved before the answer can pass):"
-        blocking_text = _feedback(blocking, title)
+        blocking_text = _blocking_feedback(blocking)
         if not budget.fits(blocking_text):
             codes = ", ".join(item.code for item in blocking)
             raise ContextBudgetError(
@@ -349,16 +579,24 @@ def assemble_context(request: ContextRequest) -> AssembledPrompt:
         return ""
 
     steps = list(request.steps)
+    if reserved["under_review"]:
+        steps = steps[:-1]
     latest = (
         choose(_step(steps[-1], False), _step(steps[-1], True), f"turn {steps[-1].turn}")
         if steps
         else ""
     )
 
-    # 4. Earlier turns, newest first, then exploration leads.
+    # 4. Earlier turns, newest first, as one-line digests: the prompt follows the step
+    #    at hand, and the plan's known facts carry what earlier turns established. An
+    #    answer's judge sees the turns behind its evidence whole.
     earlier: dict[int, str] = {}
+    candidate = request.candidate if request.phase is Phase.VERIFY else None
     for step in reversed(steps[:-1]):
-        earlier[step.turn] = choose(_step(step, False), _step(step, True), f"turn {step.turn}")
+        if candidate is not None and _supports(step, candidate):
+            earlier[step.turn] = choose(_step(step, False), _step(step, True), f"turn {step.turn}")
+        else:
+            earlier[step.turn] = choose(_step(step, True), "", f"turn {step.turn}")
     leads = [
         choose(_lead(lead, False), _lead(lead, True), f"exploration lead {lead.summary!r}")
         for lead in request.exploration
@@ -376,9 +614,13 @@ def assemble_context(request: ContextRequest) -> AssembledPrompt:
 
     note = ""
     if omitted:
+        # A bounded list, so the note always fits the reserve kept for it.
+        listed = "; ".join(omitted[:_NOTE_ITEMS])
+        more = len(omitted) - _NOTE_ITEMS
         note = (
             "Note: to fit the context budget these were shortened or omitted: "
-            + "; ".join(omitted)
+            + listed
+            + (f"; and {more} more" if more > 0 else "")
             + ". The history above is incomplete; the full record is in the run artifacts."
         )
         budget.take(note)
@@ -395,11 +637,14 @@ def assemble_context(request: ContextRequest) -> AssembledPrompt:
             else ""
         ),
         f"Latest turn:\n{latest}" if latest else "",
+        reserved["rejected"],
+        reserved["under_review"],
         blocking_text,
         advisory_text,
         reserved["report"],
         reserved["candidate"],
         reserved["provenance"],
+        reserved["cited"],
         reserved["capabilities"],
         note,
         reserved["instructions"],

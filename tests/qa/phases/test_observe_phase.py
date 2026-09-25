@@ -14,6 +14,7 @@ PLAN = {
     "known_facts": ["People!G1 is the Score header."],
     "uncertainties": ["No gender column has been seen."],
     "execution_objective": "Read People!A1:G2 to learn the header layout.",
+    "next_action": "tool",
     "rationale": "The name and score headers are merged over two rows.",
 }
 

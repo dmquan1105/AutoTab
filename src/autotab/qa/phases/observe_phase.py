@@ -1,7 +1,8 @@
 """One OBSERVE interaction: assemble context, call the model, parse ObserveResult.
 
-Runs on entry to a run and after a verification FAIL only. It never selects a tool,
-writes code, or transitions the FSM; see ``specs/phases/observe_phase.md``.
+Runs at the start of every turn and plans the objective and the kind of the next
+action. It never writes tool arguments or code, or transitions the FSM; see
+``specs/phases/observe_phase.md``.
 """
 
 from __future__ import annotations

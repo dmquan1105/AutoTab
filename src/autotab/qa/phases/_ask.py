@@ -23,6 +23,9 @@ _USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens", "cost")
 class Reply(Generic[T]):
     """The validated value, every raw reply in order, and why no value came back.
 
+    ``rejections`` pairs with ``raw``: why each reply was refused, ``None`` for the
+    accepted one, so a trace can show every attempt next to its reason.
+
     ``usage`` sums what the endpoint reported over every attempt, re-asks included,
     with ``calls`` counting the requests made; ``latency_ms`` is their total duration.
     """
@@ -32,6 +35,7 @@ class Reply(Generic[T]):
     error: str | None
     usage: dict[str, int | float] = field(default_factory=dict)
     latency_ms: float | None = None
+    rejections: tuple[str | None, ...] = ()
 
     @property
     def attempts(self) -> int:
@@ -59,6 +63,7 @@ def ask(client: ModelClient, prompt: str, parse: Callable[[str], T], *, retries:
     failed request (``ModelResponseError`` is a ``ValueError``) is retried as sent.
     """
     raw: list[str] = []
+    rejections: list[str | None] = []
     usage: dict[str, int | float] = {}
     latencies: list[float] = []
     text = prompt
@@ -66,7 +71,7 @@ def ask(client: ModelClient, prompt: str, parse: Callable[[str], T], *, retries:
 
     def reply(value: T | None) -> Reply[T]:
         total = sum(latencies) if latencies else None
-        return Reply(value, tuple(raw), error, usage, total)
+        return Reply(value, tuple(raw), error, usage, total, tuple(rejections))
 
     for _ in range(retries + 1):
         try:
@@ -83,8 +88,10 @@ def ask(client: ModelClient, prompt: str, parse: Callable[[str], T], *, retries:
             value = parse(answer)
         except ValueError as exc:
             error = str(exc)[:_ERROR_CHARS]
+            rejections.append(error)
             text = prompt + repair_request(error)
             continue
         error = None
+        rejections.append(None)
         return reply(value)
     return reply(None)

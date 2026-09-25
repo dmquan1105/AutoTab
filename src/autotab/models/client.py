@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+_READ_CHUNK = 8192
 _ERROR_BODY_CHARS = 500
 
 
@@ -130,23 +131,44 @@ class OpenAICompatibleClient:
         )
         self._last.usage = None
         started = time.perf_counter()
+        # The timeout bounds the whole request. urlopen's own timeout only bounds each
+        # socket read, and OpenRouter keeps a slow request alive with comment lines, so
+        # a stalled provider once held a run for fourteen minutes.
+        deadline = time.monotonic() + self.timeout
         try:
-            with urlopen(request, timeout=self.timeout) as response:
-                parsed: dict[str, Any] = json.loads(response.read().decode())
-        except HTTPError as exc:
+            try:
+                with urlopen(request, timeout=self.timeout) as response:
+                    chunks: list[bytes] = []
+                    # read1 returns what has arrived; read(n) would wait for n bytes.
+                    while chunk := response.read1(_READ_CHUNK):
+                        chunks.append(chunk)
+                        if time.monotonic() > deadline:
+                            raise TimeoutError
+                    body = b"".join(chunks).decode(errors="replace")
+                    try:
+                        parsed: dict[str, Any] = json.loads(body)
+                    except ValueError as exc:
+                        raise ModelResponseError(
+                            f"{self.model} response from {path} is not JSON: "
+                            f"{body[:_ERROR_BODY_CHARS]!r}"
+                        ) from exc
+            except TimeoutError as exc:
+                raise ModelResponseError(
+                    f"{self.model} request to {path} did not finish within {self.timeout:g}s"
+                ) from exc
+            except HTTPError as exc:
+                # The body carries the provider's reason (credits, rate limit, bad model
+                # id). Headers, and so the key, are never part of the message.
+                detail = exc.read().decode(errors="replace")[:_ERROR_BODY_CHARS]
+                raise ModelResponseError(
+                    f"{self.model} request to {path} failed with HTTP {exc.code}: {detail}"
+                ) from exc
+            except URLError as exc:
+                raise ModelResponseError(
+                    f"{self.model} request to {path} could not reach {self.base_url}: {exc.reason}"
+                ) from exc
+        finally:
             self._last.latency_ms = (time.perf_counter() - started) * 1000.0
-            # The body carries the provider's reason (credits, rate limit, bad model
-            # id). Headers, and so the key, are never part of the message.
-            detail = exc.read().decode(errors="replace")[:_ERROR_BODY_CHARS]
-            raise ModelResponseError(
-                f"{self.model} request to {path} failed with HTTP {exc.code}: {detail}"
-            ) from exc
-        except URLError as exc:
-            self._last.latency_ms = (time.perf_counter() - started) * 1000.0
-            raise ModelResponseError(
-                f"{self.model} request to {path} could not reach {self.base_url}: {exc.reason}"
-            ) from exc
-        self._last.latency_ms = (time.perf_counter() - started) * 1000.0
         usage = parsed.get("usage")
         self._last.usage = usage if isinstance(usage, dict) else None
         return parsed

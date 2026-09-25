@@ -1,9 +1,9 @@
 """Top-level QA FSM.
 
-Sequences INITIALIZE, OBSERVE, EXECUTE (repeating for data-gathering turns), VERIFY
-on an answer action, then FINALIZE or FAIL. It is the only owner of transitions and
-turn accounting; reusable behavior lives in layers and model calls in phases. See
-``specs/phases/agent.md``.
+Every turn is OBSERVE (plan the next step), EXECUTE (take exactly that one action),
+VERIFY (check and judge it); a verified answer finalizes, anything else plans again.
+It is the only owner of transitions and turn accounting; reusable behavior lives in
+layers and model calls in phases. See ``specs/phases/agent.md``.
 """
 
 from __future__ import annotations
@@ -28,10 +28,12 @@ from .layers.context_management import (
     ContextRequest,
     Step,
     active_feedback,
+    render_observation,
 )
 from .layers.observation import ExplorationError, load_exploration
 from .layers.sandbox import Sandbox
-from .layers.tools import ToolRegistry, WorkbookReader
+from .layers.tools import ToolError, ToolRegistry, WorkbookReader
+from .layers.verification import parse_citation
 from .phases import execute_phase, observe_phase, verify_phase
 from .phases._ask import Reply
 from .prompts import PROMPT_VERSIONS, RUBRIC_VERSION
@@ -56,6 +58,7 @@ from .schemas import (
 )
 from .trace import Trace
 
+_REJECTED_REPLY_CHARS = 300
 _REPLY_SCHEMAS = {
     Phase.OBSERVE: ObserveResult.model_json_schema(),
     Phase.EXECUTE: TypeAdapter(AgentAction).json_schema(),
@@ -103,6 +106,13 @@ class _Run:
     after_failure: bool = False
     usage_totals: dict[str, int | float] = field(default_factory=dict)
     last_action: AgentAction | None = None
+    folders: int = 0
+    # The latest step judgement. It is kept apart from the answer judgements in
+    # ``events``: a passing step must not resolve what the answer judge found.
+    step_judgement: LLMJudgeResult | None = None
+    pending: execute_phase.ExecuteOutcome | None = None
+    # Why the last EXECUTE produced no valid action; told to the next OBSERVE.
+    rejected_execute: str | None = None
 
     @property
     def qa(self) -> Mapping[str, Any]:
@@ -136,6 +146,36 @@ class _Run:
             )
         self._event(phase, usage=dict(reply.usage), latency_ms=reply.latency_ms, **fields)
 
+    def _turn_folder(self, turn: int, phase: str) -> str:
+        """Name the next phase's folder so ``ls turns/`` reads as the run's timeline."""
+        self.folders += 1
+        return f"turns/{self.folders:02d}_t{turn}_{phase}"
+
+    def _write_call(self, folder: str, prompt: str, reply: Reply[Any]) -> list[str]:
+        """Keep what the model saw and every reply it gave, with why a reply was refused."""
+        paths = [f"{folder}/prompt.txt", f"{folder}/reply.txt"]
+        self.trace.write_text(paths[0], prompt)
+        if len(reply.raw) == 1 and reply.value is not None:
+            text = reply.raw[0]
+        else:
+            parts = []
+            for index, raw in enumerate(reply.raw, start=1):
+                reason = reply.rejections[index - 1] if index <= len(reply.rejections) else None
+                verdict = f"rejected: {reason}" if reason else "accepted"
+                parts.append(f"=== attempt {index}: {verdict} ===\n{raw}")
+            if reply.value is None and reply.error:
+                parts.append(f"=== no valid reply: {reply.error} ===")
+            text = "\n\n".join(parts)
+        self.trace.write_text(paths[1], text)
+        return paths
+
+    def _feedback(self) -> list[ImprovementFeedback]:
+        items = active_feedback(self.events)
+        judged = self.step_judgement
+        if judged is not None and judged.status is RunStatus.FAIL:
+            items.extend(judged.improvement_feedback)
+        return sorted(items, key=lambda item: item.priority is not FeedbackPriority.BLOCKING)
+
     def _move(self, target: Phase, action_type: str | None = None) -> None:
         if not can_transition(self.state.phase, target.value, action_type=action_type):
             raise RuntimeError(f"illegal transition {self.state.phase} -> {target.value}")
@@ -153,8 +193,9 @@ class _Run:
             exploration=self.leads,
             steps=self.steps,
             plan=self.plan,
-            feedback=active_feedback(self.events),
+            feedback=self._feedback(),
             tool_descriptions=registry.descriptions(),
+            tool_read_cells=registry.max_read_cells,
             **extra,
         )
 
@@ -207,7 +248,9 @@ class _Run:
             {"workbook_id": wid, "path": str(self.source_paths[wid]), "sha256": digest}
             for wid, digest in self.source_hashes.items()
         ]
-        self.registry = ToolRegistry(readers)
+        self.registry = ToolRegistry(
+            readers, max_read_cells=int(self.qa["tools"]["max_read_cells"])
+        )
 
         failure = self._load_exploration(workbooks)
         if failure is not None:
@@ -254,19 +297,27 @@ class _Run:
 
     def observe(self) -> None:
         assert self.client is not None
-        request = self._request(Phase.OBSERVE, after_failure=self.after_failure)
+        request = self._request(
+            Phase.OBSERVE,
+            after_failure=self.after_failure,
+            rejected_execute=self.rejected_execute,
+        )
         outcome = observe_phase.run(request, self.client, retries=self.retries)
         if outcome.plan is not None:
             self.plan = outcome.plan
             self.state.objective = outcome.plan.execution_objective
-        # What the model saw, verbatim: the trajectory alone shows what it did, not why.
-        prompt_path = f"prompts/{self.state.turn}.observe.txt"
-        self.trace.write_text(prompt_path, outcome.prompt.text)
+        # What the model saw and said, verbatim: the trajectory alone shows what it did,
+        # not why.
+        folder = self._turn_folder(self.state.turn, "observe")
+        paths = self._write_call(folder, outcome.prompt.text, outcome.reply)
+        if outcome.plan is not None:
+            paths.append(f"{folder}/plan.json")
+            self.trace.write_json(paths[-1], outcome.plan.model_dump(mode="json"))
         self._model_event(
             Phase.OBSERVE,
             outcome.reply,
             prompt_version=PROMPT_VERSIONS["observe"],
-            artifact_paths=[prompt_path],
+            artifact_paths=paths,
             observable_model_response=(
                 outcome.plan.model_dump(mode="json")
                 if outcome.plan is not None
@@ -276,12 +327,15 @@ class _Run:
             error=outcome.reply.error if outcome.plan is None else None,
         )
         self.after_failure = False
+        self.rejected_execute = None
 
     # --- EXECUTE ---------------------------------------------------------------------
 
     def execute(self) -> AgentAction | None:
         assert self.client is not None and self.registry is not None and self.sandbox is not None
         execution_id = f"exec_{self.state.turn + 1}"
+        # The kind is known only after the reply, so the folder name gets it appended.
+        base = self._turn_folder(self.state.turn + 1, "execute")
         request = self._request(Phase.EXECUTE, sandbox_names=self.sandbox.bound_names())
         outcome = execute_phase.run(
             request,
@@ -289,6 +343,7 @@ class _Run:
             registry=self.registry,
             sandbox=self.sandbox,
             execution_id=execution_id,
+            code_path=f"{base}_code/code.py",
             retries=self.retries,
             max_observation_chars=int(self.qa["max_observation_chars"]),
             max_inline_cells=int(self.qa["max_inline_cells"]),
@@ -298,34 +353,41 @@ class _Run:
         action = outcome.action
         if action is not None:
             self.last_action = action
-        prompt_path = f"prompts/{self.state.turn}.execute.txt"
-        self.trace.write_text(prompt_path, outcome.prompt.text)
-        paths = [f"actions/{execution_id}.json", prompt_path]
-        self.trace.write_json(
-            paths[0],
-            {
-                "execution_id": execution_id,
-                "turn": self.state.turn,
-                "action": action.model_dump(mode="json") if action is not None else None,
-                "model_replies": list(outcome.reply.raw),
-                "raw_result": (
-                    outcome.raw_result.model_dump(mode="json") if outcome.raw_result else None
-                ),
-                "action_checks": outcome.report.model_dump(mode="json") if outcome.report else None,
-            },
-        )
+        folder = f"{base}_{action.action_type.value if action is not None else 'invalid'}"
+        paths = self._write_call(folder, outcome.prompt.text, outcome.reply)
+        if action is not None:
+            paths.append(f"{folder}/action.json")
+            self.trace.write_json(
+                paths[-1],
+                {
+                    "execution_id": execution_id,
+                    "turn": self.state.turn,
+                    **action.model_dump(mode="json"),
+                },
+            )
         if isinstance(action, CodeAction):
-            code_path = f"code/{execution_id}.py"
-            self.trace.write_text(code_path, action.code)
-            paths.append(code_path)
+            paths.append(f"{folder}/code.py")
+            self.trace.write_text(paths[-1], action.code)
+        if outcome.raw_result is not None:
+            paths.append(f"{folder}/result.json")
+            self.trace.write_json(paths[-1], outcome.raw_result.model_dump(mode="json"))
+        if outcome.observation is not None:
+            # Exactly what the next prompt shows of this action.
+            paths.append(f"{folder}/observation.txt")
+            self.trace.write_text(paths[-1], render_observation(outcome.observation) + "\n")
         for record in outcome.computations:
             self.computations[record.id] = record
-            state = outcome.raw_result.state if outcome.raw_result else ResultState.ERROR
-            self.computation_states[record.id] = state
+            # A record exists only if record_computation read its inputs and accepted it,
+            # and CALC.ARITHMETIC replays it, so it is complete whatever the rest of its
+            # code did. Tying it to the run's state once failed every answer citing a
+            # correct maximum recorded just before an unrelated error.
+            self.computation_states[record.id] = ResultState.SUCCESS
             paths.append(f"computations/{record.id}.json")
             self.trace.write_json(paths[-1], record.model_dump(mode="json"))
-        if outcome.report is not None:
-            self.events.append(outcome.report)
+        self.pending = outcome
+        if action is None:
+            last = outcome.reply.raw[-1][:_REJECTED_REPLY_CHARS] if outcome.reply.raw else ""
+            self.rejected_execute = f"{outcome.reply.error}; its last reply began: {last}"
         if outcome.observation is not None and action is not None:
             self.steps.append(Step(self.state.turn, action, outcome.observation, execution_id))
             self.state.latest_observation = outcome.observation
@@ -355,59 +417,121 @@ class _Run:
         assert self.registry is not None
         return any(sheet in reader.sheet_names() for reader in self.registry.readers())
 
-    def verify(self, candidate: CandidateAnswer) -> VerificationResult:
+    def _cited_cells(self, candidate: CandidateAnswer) -> dict[str, list[tuple[str, Any]]]:
+        """Read every cited range, so the judge sees the values instead of trusting them."""
+        assert self.registry is not None
+        cited: dict[str, list[tuple[str, Any]]] = {}
+        for claim in candidate.claims:
+            for citation in claim.citations:
+                parsed = parse_citation(citation)
+                if citation in cited or parsed is None:
+                    continue
+                sheet, range_ref = parsed
+                for reader in self.registry.readers():
+                    if sheet not in reader.sheet_names():
+                        continue
+                    try:
+                        payload = reader.read_range(range_ref, sheet)
+                    except ToolError:
+                        break  # an unreadable citation is ANSWER.CITATION_EXISTS's to report
+                    rows = payload["cells"]
+                    assert isinstance(rows, list)
+                    cited[citation] = [
+                        (str(cell["coordinate"]), cell.get("displayed"))
+                        for row in rows
+                        if isinstance(row, list)
+                        for cell in row
+                        if isinstance(cell, dict)
+                    ]
+                    break
+        return cited
+
+    def verify(self, action: AgentAction) -> VerificationResult:
+        """Check and judge the action this turn took."""
         assert self.client is not None
-        artifact = f"verification/{self.state.turn}.json"
-        evidence = verify_phase.AnswerEvidence(
-            computations=self.computations,
-            computation_states=self.computation_states,
-            resolve_citation=self._resolves,
-            source_hashes={
-                wid: (digest, _sha256(self.source_paths[wid]))
-                for wid, digest in self.source_hashes.items()
-            },
-        )
-        outcome = verify_phase.run(
-            self._request(Phase.VERIFY, candidate=candidate, computations=self.computations),
-            self.client,
-            evidence=evidence,
-            artifact=artifact,
-            retries=self.retries,
-        )
-        self.trace.write_text(f"verification/{self.state.turn}.prompt.txt", outcome.prompt.text)
-        self.trace.write_json(
-            artifact,
-            {
-                "turn": self.state.turn,
-                "deterministic": outcome.report.model_dump(mode="json"),
-                "judge_raw": list(outcome.reply.raw),
-                "judge": (
-                    outcome.reply.value.model_dump(mode="json") if outcome.reply.value else None
+        folder = self._turn_folder(self.state.turn, f"verify_{action.action_type.value}")
+        artifact = f"{folder}/verdict.json"
+        if isinstance(action, AnswerAction):
+            evidence = verify_phase.AnswerEvidence(
+                computations=self.computations,
+                computation_states=self.computation_states,
+                resolve_citation=self._resolves,
+                source_hashes={
+                    wid: (digest, _sha256(self.source_paths[wid]))
+                    for wid, digest in self.source_hashes.items()
+                },
+            )
+            outcome = verify_phase.run(
+                self._request(
+                    Phase.VERIFY,
+                    candidate=action.answer,
+                    computations=self.computations,
+                    cited_cells=self._cited_cells(action.answer),
                 ),
-                "result": outcome.result.model_dump(mode="json"),
-            },
+                self.client,
+                evidence=evidence,
+                artifact=artifact,
+                retries=self.retries,
+            )
+        else:
+            pending = self.pending
+            assert pending is not None and pending.raw_result is not None
+            outcome = verify_phase.run_step(
+                self._request(Phase.VERIFY),
+                self.client,
+                state=pending.raw_result.state,
+                computations=pending.computations,
+                artifact=artifact,
+                retries=self.retries,
+            )
+        # A read is checked without a judge, so its folder holds no prompt or reply.
+        paths = (
+            self._write_call(folder, outcome.prompt.text, outcome.reply)
+            if outcome.prompt is not None
+            else []
         )
+        paths.append(f"{folder}/checks.json")
+        self.trace.write_json(paths[-1], outcome.report.model_dump(mode="json"))
+        if outcome.reply.value is not None:
+            paths.append(f"{folder}/judge.json")
+            self.trace.write_json(paths[-1], outcome.reply.value.model_dump(mode="json"))
+        paths.append(artifact)
+        self.trace.write_json(artifact, outcome.result.model_dump(mode="json"))
         self.events.append(outcome.report)
-        self.events.append(outcome.reply.value or _unreadable_judge(outcome.result))
+        judgement = outcome.reply.value or _unreadable_judge(outcome.result)
+        if isinstance(action, AnswerAction):
+            self.events.append(judgement)
+            self.step_judgement = None
+        elif outcome.prompt is not None:
+            # An unjudged read replaces no judgement: only a newer one resolves it.
+            self.step_judgement = judgement
         self.state.latest_verification = outcome.result
         self._model_event(
             Phase.VERIFY,
             outcome.reply,
-            prompt_version=PROMPT_VERSIONS["verification"],
+            prompt_version=(
+                PROMPT_VERSIONS["verification"] if outcome.prompt is not None else None
+            ),
             observable_model_response=(
                 outcome.reply.value.model_dump(mode="json")
                 if outcome.reply.value
-                else list(outcome.reply.raw)
+                else (list(outcome.reply.raw) or None)
             ),
             verification_result=outcome.result,
-            artifact_paths=[artifact, f"verification/{self.state.turn}.prompt.txt"],
+            artifact_paths=paths,
         )
         return outcome.result
 
     # --- terminal --------------------------------------------------------------------
 
+    def budget_reason(self) -> str:
+        reason = f"the budget of {self.state.max_turns} turns ran out before an answer was verified"
+        last = self.state.latest_verification
+        if last is not None and last.status is RunStatus.FAIL:
+            reason += f"; the last verification failed: {last.reason}"
+        return reason
+
     def finalize(self, candidate: CandidateAnswer, result: VerificationResult) -> RunOutcome:
-        self._move(Phase.FINALIZE)
         evidence = [
             f"- {claim.statement} ({', '.join(claim.citations) or 'no citation'}"
             + (f"; computation {claim.computation_id}" if claim.computation_id else "")
@@ -510,31 +634,27 @@ def run(
         session._move(Phase.OBSERVE)
         while True:
             if session.state.phase == Phase.OBSERVE.value:
+                if max_turns_reached(session.state):
+                    return session.fail(session.budget_reason())
                 session.observe()
                 session._move(Phase.EXECUTE)
                 continue
             if session.state.phase == Phase.EXECUTE.value:
-                if max_turns_reached(session.state):
-                    return session.fail(
-                        f"the budget of {session.state.max_turns} turns ran out before an "
-                        "answer was verified"
-                    )
                 action = session.execute()
-                action_type = action.action_type.value if action is not None else "tool"
-                target = Phase.VERIFY if isinstance(action, AnswerAction) else Phase.EXECUTE
-                session._move(target, action_type)
+                if action is None:
+                    # Nothing ran, so nothing can be verified. The planner hears why:
+                    # retrying the same plan let a run burn eleven turns.
+                    session._move(Phase.OBSERVE)
+                    continue
+                session._move(Phase.VERIFY, action.action_type.value)
                 continue
-            candidate = session.state.candidate
-            assert candidate is not None
-            result = session.verify(candidate)
-            if result.status is RunStatus.PASS:
-                return session.finalize(candidate, result)
-            if max_turns_reached(session.state):
-                return session.fail(
-                    f"the budget of {session.state.max_turns} turns ran out; the last "
-                    f"verification failed: {result.reason}"
-                )
-            session.after_failure = True
+            action = session.last_action
+            assert action is not None
+            result = session.verify(action)
+            if isinstance(action, AnswerAction) and result.status is RunStatus.PASS:
+                session._move(Phase.FINALIZE, action.action_type.value)
+                return session.finalize(action.answer, result)
+            session.after_failure = result.status is RunStatus.FAIL
             session._move(Phase.OBSERVE)
     except ContextBudgetError as exc:
         return session.fail(f"the prompt could not be built within budget: {exc}")

@@ -140,12 +140,82 @@ _NUMERIC_OPERATIONS: dict[str, Callable[[list[float]], float]] = {
 # What record_computation accepts: exactly what CALC.ARITHMETIC can replay, so a
 # recorded computation can never be one this check silently skips.
 NUMERIC_OPERATIONS = frozenset(_NUMERIC_OPERATIONS)
-REPLAYABLE_OPERATIONS = NUMERIC_OPERATIONS | {"count"}
+# A row selection: which rows of one column meet a condition. Its output is the list of
+# worksheet row numbers, and replay re-derives exactly that list from the inputs.
+ROW_SELECTION = "rows_where"
+CONDITIONS = ("equals", "not_equals", "gt", "ge", "lt", "le", "contains")
+REPLAYABLE_OPERATIONS = NUMERIC_OPERATIONS | {"count", ROW_SELECTION}
+
+
+_ORDER: dict[str, Callable[[Any, Any], bool]] = {
+    "gt": lambda left, right: left > right,
+    "ge": lambda left, right: left >= right,
+    "lt": lambda left, right: left < right,
+    "le": lambda left, right: left <= right,
+}
+
+
+def meets(value: Any, op: str, target: Any) -> bool:
+    """Whether one cell value meets a row-selection condition.
+
+    Numbers compare as numbers and text as text -- ISO dates, as wb.range returns dates,
+    order correctly as text. ``contains`` is a case-insensitive substring test. A number
+    and a text never meet an ordering, so a label in a numeric column is not selected.
+    """
+    if op == "contains":
+        return isinstance(value, str) and str(target).casefold() in value.casefold()
+    if _is_number(value) and _is_number(target):
+        left, right = float(value), float(target)
+        close = abs(left - right) <= _RELATIVE_EPSILON * max(1.0, abs(right))
+        if op in ("equals", "not_equals"):
+            return close if op == "equals" else not close
+        return _ORDER[op](left, right)
+    if op == "equals":
+        return bool(value == target)
+    if op == "not_equals":
+        return bool(value != target)
+    if isinstance(value, str) and isinstance(target, str):
+        return _ORDER[op](value, target)
+    return False
+
+
+def _row_of(reference: str | None) -> int | None:
+    parsed = parse_citation(reference) if reference else None
+    if parsed is None:
+        return None
+    match = re.match(r"^[A-Z]+(\d+)$", parsed[1])
+    return int(match.group(1)) if match else None
+
+
+def _replay_selection(record: ComputationRecord) -> tuple[bool | None, str]:
+    condition = record.metadata.get("condition")
+    if not isinstance(condition, dict) or condition.get("op") not in CONDITIONS:
+        return False, f"{record.id}: a row selection needs a recorded condition"
+    op, target = str(condition["op"]), condition.get("value")
+    rows = sorted(
+        {
+            row
+            for item in record.inputs
+            if meets(item.value, op, target) and (row := _row_of(item.reference)) is not None
+        }
+    )
+    recorded = record.output if isinstance(record.output, list) else [record.output]
+    numbers = [row for row in recorded if isinstance(row, int) and not isinstance(row, bool)]
+    if len(numbers) != len(recorded):
+        return False, f"{record.id}: a row selection's output must be worksheet row numbers"
+    if rows == sorted(numbers):
+        return True, f"{record.id}: rows where value {op} {target!r} replay to {rows}"
+    return (
+        False,
+        f"{record.id}: rows where value {op} {target!r} replay to {rows}, recorded {recorded}",
+    )
 
 
 def _replay(record: ComputationRecord) -> tuple[bool | None, str]:
     """Return (passed, reason); passed is None when the record is not replayable."""
     operation = record.operation.strip().lower()
+    if operation == ROW_SELECTION:
+        return _replay_selection(record)
     if operation == "count":
         recomputed: float = len(record.inputs)
     elif operation in _NUMERIC_OPERATIONS:
@@ -402,8 +472,8 @@ _MISSING_COMPUTATION = (
 _MISLINKED_CLAIM = (
     "Do not recompute: the computations exist, but a claim points at the wrong one. Give "
     "each computation_id only to the claim whose value is that computation's output. A "
-    "looked-up label -- the name or category on the row holding a maximum -- is a "
-    "separate claim backed by citations, with computation_id null."
+    "looked-up label -- a name or category found in the rows a condition selects -- is a "
+    "separate claim backed by citations of its exact cells, with computation_id null."
 )
 
 
@@ -442,15 +512,23 @@ def feedback_for(report: DeterministicCheckReport) -> list[ImprovementFeedback]:
 
 
 def extract_json_object(raw: str) -> str:
-    """Return the outermost JSON object in a model reply, tolerating fences and prose.
+    """Return the first complete JSON object in a model reply, tolerating fences and prose.
+
+    Each ``{`` is tried in turn and the first that decodes as a whole object wins, so
+    braces in surrounding prose or code no longer glue two fragments into one.
 
     Raises:
         ValueError: If the reply holds no JSON object.
     """
-    start, end = raw.find("{"), raw.rfind("}")
-    if start == -1 or end <= start:
-        raise ValueError("the reply contains no JSON object")
-    return raw[start : end + 1]
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", raw):
+        try:
+            value, end = decoder.raw_decode(raw, match.start())
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return raw[match.start() : end]
+    raise ValueError("the reply contains no JSON object")
 
 
 def normalize_llm_judge(raw: str) -> LLMJudgeResult:
@@ -460,7 +538,16 @@ def normalize_llm_judge(raw: str) -> LLMJudgeResult:
         ValueError: If the reply holds no JSON object or it fails the contract;
             pydantic's ValidationError is a ValueError.
     """
-    return LLMJudgeResult.model_validate_json(extract_json_object(raw))
+    payload = json.loads(extract_json_object(raw))
+    # A judge's feedback is sourced from the judge and rechecked by the judge, by
+    # definition; those two fields are filled in, not left for the model to get wrong.
+    items = payload.get("improvement_feedback") if isinstance(payload, dict) else None
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict):
+                item["source"] = FeedbackSource.LLM_JUDGE.value
+                item["recheck"] = LLM_JUDGE_RECHECK
+    return LLMJudgeResult.model_validate_json(json.dumps(payload))
 
 
 def _verifier_failure(error: str) -> ImprovementFeedback:
@@ -471,6 +558,21 @@ def _verifier_failure(error: str) -> ImprovementFeedback:
         action="Answer again with explicit claims so the verifier can judge them.",
         priority=FeedbackPriority.BLOCKING,
         recheck=LLM_JUDGE_RECHECK,
+    )
+
+
+def combine_checks(report: DeterministicCheckReport, *, artifact: str) -> VerificationResult:
+    """The verdict of a step that is checked but not judged: its checks decide alone."""
+    failed = [check for check in report.checks if check.status is RunStatus.FAIL]
+    return VerificationResult(
+        status=RunStatus.FAIL if failed else RunStatus.PASS,
+        reason=(
+            f"{failed[0].id}: {failed[0].reason}"
+            if failed
+            else "The read came back complete; a read is checked, not judged."
+        ),
+        artifact=artifact,
+        improvement_feedback=feedback_for(report),
     )
 
 

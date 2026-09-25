@@ -129,11 +129,16 @@ StrictFloat = Annotated[float, BeforeValidator(_reject_integer)]
 
 
 class ObserveResult(StrictModel):
-    """The observe model's plan for the next execution turn."""
+    """The observe model's plan for the next execution turn.
+
+    ``next_action`` is the kind of the one action EXECUTE must take for the objective;
+    choosing it here keeps the decision of what to do next with the planner.
+    """
 
     known_facts: list[str]
     uncertainties: list[str]
     execution_objective: NonEmptyStr
+    next_action: ActionType
     rationale: NonEmptyStr
 
 
@@ -182,6 +187,21 @@ class ComputationRecord(StrictModel):
 
 class _ActionBase(StrictModel):
     rationale: NonEmptyStr
+
+
+class ToolReply(StrictModel):
+    """EXECUTE's reply when the plan names a tool call; the harness builds the action."""
+
+    tool_name: NonEmptyStr
+    arguments: dict[str, JsonValue]
+    rationale: str = ""
+
+
+class AnswerReply(StrictModel):
+    """EXECUTE's reply when the plan names an answer; the harness builds the action."""
+
+    answer: CandidateAnswer
+    rationale: str = ""
 
 
 class ToolAction(_ActionBase):
@@ -446,6 +466,7 @@ __all__ = [
     "ActionType",
     "AgentAction",
     "AnswerAction",
+    "AnswerReply",
     "CandidateAnswer",
     "Claim",
     "CodeAction",
@@ -469,6 +490,7 @@ __all__ = [
     "SandboxResult",
     "StrictModel",
     "ToolAction",
+    "ToolReply",
     "ToolResult",
     "VerificationResult",
 ]

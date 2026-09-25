@@ -203,7 +203,8 @@ def test_sandbox_result_is_labeled_agent_computed() -> None:
             result={"max_score": 99},
             computation_ids=["calc_1"],
             facade_calls=[{"method": "sheet", "workbook_id": WORKBOOK_ID, "sheet_name": "People"}],
-        )
+        ),
+        code_path="turns/03_t3_execute_code/code.py",
     )
 
     assert observation.source is ObservationSource.SANDBOX
@@ -212,6 +213,7 @@ def test_sandbox_result_is_labeled_agent_computed() -> None:
     kinds = {reference.kind for reference in observation.provenance}
     assert ProvenanceKind.COMPUTATION in kinds
     assert ProvenanceKind.ARTIFACT in kinds
+    assert observation.provenance[0].artifact_path == "turns/03_t3_execute_code/code.py"
 
 
 def test_sandbox_error_keeps_the_message_and_asks_to_fix_the_code() -> None:
@@ -312,3 +314,27 @@ def test_a_previewed_sandbox_result_is_marked_partial_but_the_run_complete() -> 
 
     assert observation.status is ResultState.TRUNCATED
     assert any("bound in the session" in note for note in observation.uncertainties)
+
+
+def test_ranges_code_read_through_wb_are_workbook_provenance() -> None:
+    # The answer judge is shown the turns behind the cells an answer cites; a code step
+    # that read those cells must say so.
+    observation = normalize_sandbox(
+        SandboxResult(
+            state=ResultState.SUCCESS,
+            execution_id="exec_2",
+            result="Nga",
+            facade_calls=[
+                {
+                    "method": "range",
+                    "workbook_id": WORKBOOK_ID,
+                    "range_ref": "B13:D13",
+                    "sheet_name": "People",
+                },
+                {"method": "sheet", "workbook_id": WORKBOOK_ID, "sheet_name": "People"},
+            ],
+        )
+    )
+
+    workbook = [p for p in observation.provenance if p.kind is ProvenanceKind.WORKBOOK]
+    assert [(p.sheet, p.range_ref) for p in workbook] == [("People", "B13:D13")]

@@ -6,7 +6,9 @@ drift between the two surfaces; see ``specs/layers/tools.md``.
 
 from __future__ import annotations
 
+import datetime as dt
 import json
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -29,6 +31,17 @@ from ..schemas import (
 )
 
 DEFAULT_MAX_RANGE_CELLS = 10_000
+# The structure summary: how many columns are profiled, how many text cells each lists,
+# and how many flagged rows are listed.
+_MAX_PROFILED_COLUMNS = 40
+_TEXT_CELLS = 3
+_MAX_LISTED_ROWS = 10
+_LABEL_CHARS = 40
+# The verbatim window: the first non-blank rows of the used range, left to right.
+_WINDOW_ROWS = 8
+_WINDOW_COLUMNS = 12
+_WINDOW_CHARS = 24
+_TOTAL_LABEL = re.compile(r"\b(grand total|sub-?total|total|sum|tổng)\b", re.IGNORECASE)
 
 
 class ToolError(ValueError):
@@ -57,16 +70,31 @@ class _SheetArgs(_ToolArgs):
     sheet_name: NonEmptyStr | None = None
 
 
-class InspectRangeArgs(_SheetArgs):
+class _RangeArgs(_SheetArgs):
+    range_ref: NonEmptyStr
+
+    @model_validator(mode="before")
+    @classmethod
+    def _split_sheet(cls, data: Any) -> Any:
+        """Accept 'Sheet!A1:B9' as range_ref, as models write it by habit."""
+        if not isinstance(data, dict) or "!" not in str(data.get("range_ref", "")):
+            return data
+        sheet, _, range_ref = str(data["range_ref"]).rpartition("!")
+        if len(sheet) > 1 and sheet[0] == sheet[-1] == "'":
+            sheet = sheet[1:-1].replace("''", "'")
+        named = data.get("sheet_name")
+        if named is not None and named != sheet:
+            raise ValueError(f"range_ref names sheet {sheet!r} but sheet_name is {named!r}")
+        return {**data, "sheet_name": sheet, "range_ref": range_ref}
+
+
+class InspectRangeArgs(_RangeArgs):
     """Read raw and cached values of one A1 cell or rectangular range."""
 
-    range_ref: NonEmptyStr
 
-
-class InspectAttributesArgs(_SheetArgs):
+class InspectAttributesArgs(_RangeArgs):
     """Read registered cell attributes of one A1 cell or rectangular range."""
 
-    range_ref: NonEmptyStr
     attributes: Annotated[list[AttributeName], Field(min_length=1)]
 
     @model_validator(mode="after")
@@ -114,15 +142,18 @@ class WorkbookReader:
         return [ws.title for ws in self._formulas.worksheets if self._is_readable(ws)]
 
     def describe(self) -> list[dict[str, Any]]:
-        """Return each readable sheet's name, used range, and merged ranges.
+        """Return each readable sheet's name, used range, merges, and structure.
 
-        This is the workbook manifest the model sees before it reads anything.
+        This is the workbook manifest the model sees before it reads anything. The
+        structure summary states what is where, computed from every cell with no model
+        call; it interprets nothing, since headers and layouts vary too much to guess.
         """
         return [
             {
                 "name": sheet.title,
                 "dimensions": sheet.dimensions,
                 "merged": sorted(str(merged) for merged in sheet.merged_cells.ranges),
+                "structure": _structure(self._values[sheet.title], sheet),
             }
             for sheet in self._formulas.worksheets
             if self._is_readable(sheet)
@@ -322,6 +353,116 @@ class WorkbookReader:
         )
 
 
+def _kind(value: Any) -> str:
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, (dt.date, dt.time, dt.timedelta)):
+        return "date"
+    return "text"
+
+
+def _structure(values: Worksheet, formulas: Worksheet) -> dict[str, JsonValue]:
+    """Profile one sheet column by column over its whole used range.
+
+    Only facts about cells: how many hold each type, where the numbers and dates lie
+    and their range, how many are formulas, and the first text cells with their
+    coordinates. Which rows are headers, and what a column means, is left to the model.
+    """
+    min_col, min_row, max_col, max_row = range_boundaries(values.dimensions)
+    assert min_col is not None and min_row is not None
+    assert max_col is not None and max_row is not None
+    bounds = {"min_row": min_row, "max_row": max_row, "min_col": min_col, "max_col": max_col}
+    rows = list(values.iter_rows(**bounds, values_only=True))
+    formula_rows = list(formulas.iter_rows(**bounds, values_only=True))
+    width = max_col - min_col + 1
+    columns: list[JsonValue] = []
+    for offset in range(min(width, _MAX_PROFILED_COLUMNS)):
+        letter = get_column_letter(min_col + offset)
+        counts: dict[str, int] = {}
+        numbers: list[tuple[int, Any]] = []
+        dates: list[tuple[int, Any]] = []
+        text: list[JsonValue] = []
+        for index, row in enumerate(rows):
+            value = row[offset]
+            if value is None:
+                continue
+            kind = _kind(value)
+            counts[kind] = counts.get(kind, 0) + 1
+            if kind == "number":
+                numbers.append((min_row + index, value))
+            elif kind == "date":
+                dates.append((min_row + index, value))
+            elif kind == "text" and len(text) < _TEXT_CELLS:
+                text.append([f"{letter}{min_row + index}", str(value)[:_LABEL_CHARS]])
+        profile: dict[str, JsonValue] = {
+            "column": letter,
+            "filled": sum(counts.values()),
+            "counts": {kind: count for kind, count in counts.items()},
+            "formulas": sum(
+                1
+                for row in formula_rows
+                if isinstance(row[offset], str) and row[offset].startswith("=")
+            ),
+        }
+        if numbers:
+            profile["numbers"] = _spread(numbers)
+        if dates:
+            profile["dates"] = _spread(dates)
+        if text:
+            profile["text"] = text
+        columns.append(profile)
+
+    totals = [
+        min_row + index
+        for index, row in enumerate(rows)
+        if any(isinstance(value, str) and _TOTAL_LABEL.search(value) for value in row)
+    ]
+    blanks = [min_row + index for index, row in enumerate(rows) if all(v is None for v in row)]
+    return {
+        "window": _window(rows, min_row, min_col),
+        "columns": columns,
+        "more_columns": max(0, width - _MAX_PROFILED_COLUMNS),
+        "total_rows": totals[:_MAX_LISTED_ROWS],
+        "blank_rows": blanks[:_MAX_LISTED_ROWS],
+    }
+
+
+def _window(rows: list[tuple[Any, ...]], min_row: int, min_col: int) -> dict[str, JsonValue]:
+    """The top-left cells exactly as they are: the shape of the table's top.
+
+    Blank rows are skipped so a gap does not waste the window; covered merged cells are
+    null, as in the workbook, and the merged ranges are listed beside the window.
+    """
+    width = min(len(rows[0]), _WINDOW_COLUMNS) if rows else 0
+    shown: list[JsonValue] = []
+    for index, row in enumerate(rows):
+        if len(shown) == _WINDOW_ROWS:
+            break
+        if all(value is None for value in row):
+            continue
+        cells: list[JsonValue] = []
+        for value in row[:width]:
+            cell = _jsonable(value)
+            if isinstance(cell, str) and len(cell) > _WINDOW_CHARS:
+                cell = cell[: _WINDOW_CHARS - 1] + "…"
+            cells.append(cell)
+        shown.append([min_row + index, cells])
+    columns: list[JsonValue] = [get_column_letter(min_col + offset) for offset in range(width)]
+    return {"columns": columns, "rows": shown}
+
+
+def _spread(cells: list[tuple[int, Any]]) -> dict[str, JsonValue]:
+    """Min, max, and the first and last row of a column's numbers or dates."""
+    values = [value for _, value in cells]
+    try:
+        low, high = min(values), max(values)
+    except TypeError:  # dates mixed with times do not compare; order them as text
+        low, high = min(values, key=str), max(values, key=str)
+    return {"min": _jsonable(low), "max": _jsonable(high), "rows": [cells[0][0], cells[-1][0]]}
+
+
 def _jsonable(value: Any) -> JsonValue:
     """Return a JSON-safe copy of a workbook value without inventing one."""
     if value is None or isinstance(value, (str, int, float, bool)):
@@ -481,9 +622,18 @@ SPECS: tuple[ToolSpec, ...] = (
 class ToolRegistry:
     """Validated, read-only dispatch for the v1 tool set."""
 
-    def __init__(self, readers: Iterable[WorkbookReader]) -> None:
+    def __init__(
+        self, readers: Iterable[WorkbookReader], *, max_read_cells: int | None = None
+    ) -> None:
+        """Args:
+        readers: The workbooks of the run.
+        max_read_cells: The most cells one tool call may return. The model's tools
+            are for looking; bulk data belongs in a code step, whose facade uses a
+            registry without this limit.
+        """
         self._readers = {reader.workbook_id: reader for reader in readers}
         self._specs = {spec.name: spec for spec in SPECS}
+        self.max_read_cells = max_read_cells
 
     def readers(self) -> list[WorkbookReader]:
         """Return the registered workbook readers, in registration order."""
@@ -495,10 +645,17 @@ class ToolRegistry:
 
     def descriptions(self) -> list[dict[str, Any]]:
         """Return the prompt-facing tool descriptions and generated schemas."""
+        limit = (
+            f" Returns at most {self.max_read_cells} cells; process anything larger in a "
+            "code step."
+            if self.max_read_cells is not None
+            else ""
+        )
         return [
             {
                 "name": spec.name,
-                "description": spec.description,
+                "description": spec.description
+                + (limit if spec.args_model is not SearchArgs else ""),
                 "schema": spec.args_model.model_json_schema(),
             }
             for spec in SPECS
@@ -526,6 +683,7 @@ class ToolRegistry:
             # arrive as strings, while strict mode still refuses "1" for an integer.
             args = spec.args_model.model_validate_json(json.dumps(arguments))
             reader = self._reader(args.workbook_id)
+            self._check_read_size(reader, args)
             payload, state = spec.handler(reader, args)
         except (ValidationError, TypeError) as exc:
             if isinstance(exc, TypeError):
@@ -539,6 +697,37 @@ class ToolRegistry:
             arguments=arguments,
             result=payload,
             provenance=[_provenance(args, payload)],
+        )
+
+    def _check_read_size(self, reader: WorkbookReader, args: _ToolArgs) -> None:
+        """Refuse a tool read above the limit, and say how to do it in code instead."""
+        if self.max_read_cells is None:
+            return
+        if isinstance(args, (InspectRangeArgs, InspectAttributesArgs)):
+            min_row, min_col, max_row, max_col = reader._bounds(args.range_ref)
+            what = args.range_ref.upper()
+        elif isinstance(args, SheetDataframeArgs):
+            # Exactly what read_sheet returns: rows after header_row, all columns.
+            sheet_values = reader._values[reader.resolve_sheet(args.sheet_name)]
+            first = 1 if args.header_row is None else args.header_row + 1
+            rows = max(0, int(sheet_values.max_row) - first + 1)
+            if args.max_rows is not None:
+                rows = min(rows, args.max_rows)
+            min_col, min_row, max_col = 1, first, int(sheet_values.max_column)
+            max_row = first + rows - 1
+            what = "the whole sheet"
+        else:
+            return
+        cells = (max_row - min_row + 1) * (max_col - min_col + 1)
+        if cells <= self.max_read_cells:
+            return
+        sheet = reader.resolve_sheet(args.sheet_name)
+        raise ToolError(
+            f"{sheet}!{what} covers {cells} cells, above the {self.max_read_cells} cells a "
+            "tool read may return. Tools are for looking at a few cells; process this "
+            f"data in a code step instead, e.g. df = wb.sheet({sheet!r}, header_row=None) "
+            "and select the rows and columns there. Every column of the sheet is already "
+            "profiled in the workbook manifest."
         )
 
     @staticmethod

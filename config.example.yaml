@@ -73,4 +73,5 @@ qa:
     timeout_seconds: 10
     memory_limit_mb: 512
   tools:
-    max_range_cells: 10000
+    max_range_cells: 10000     # the most cells any single read may cover, in code too
+    max_read_cells: 200        # the most cells one tool call may return; larger is code

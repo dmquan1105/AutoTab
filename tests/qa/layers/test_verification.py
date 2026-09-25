@@ -402,3 +402,92 @@ def test_a_one_item_list_equals_its_item(claimed: Any, output: Any, matches: boo
     report = _answer_report(_candidate(value=claimed), computations={"calc_1": record})
 
     assert (_status(report, "ANSWER.PROVENANCE") is RunStatus.PASS) is matches
+
+
+@pytest.mark.parametrize(
+    "fixed",
+    [
+        {"recheck": "DATA_HANDLING.SCOPE_ERROR"},
+        {"source": "deterministic_check", "recheck": "CALC.ARITHMETIC"},
+        {"recheck": None},
+    ],
+)
+def test_the_fixed_fields_of_judge_feedback_are_filled_in_not_rejected(
+    fixed: dict[str, Any],
+) -> None:
+    # Every judge item is sourced from the judge and rechecked by it, by definition. A
+    # real run lost a whole verdict to a judge that wrote its code into `recheck`.
+    payload = _judge("FAIL")
+    item = {**payload["improvement_feedback"][0], **fixed}
+    payload["improvement_feedback"] = [{k: v for k, v in item.items() if v is not None}]
+
+    result = normalize_llm_judge(json.dumps(payload))
+
+    assert result.improvement_feedback[0].source is FeedbackSource.LLM_JUDGE
+    assert result.improvement_feedback[0].recheck == "LLM_JUDGE"
+
+
+def _selection(output: Any, op: str = "equals", value: Any = 99, values: Any = None) -> Any:
+    record = _computation("rows_where", values or [92, 60, 99, 99], output)
+    return record.model_copy(
+        update={"metadata": {"condition": {"op": op, "value": value, "source": "calc_1"}}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("record", "passes"),
+    [
+        (_selection([5, 6]), True),  # G5 and G6 hold 99: a tie, both rows
+        (_selection([5]), False),  # a row is missing
+        (_selection([4, 5, 6]), False),  # an extra row
+        (_selection([3, 5, 6], op="ge", value=92), True),
+        (_selection([4], op="lt", value=92), True),
+        (_selection([3, 4], op="not_equals", value=99), True),
+        (_selection([4], op="contains", value="an", values=["Ha", "An", "Minh"]), True),
+    ],
+)
+def test_a_row_selection_replays_exactly(record: Any, passes: bool) -> None:
+    report = run_action_checks(ResultState.SUCCESS, [record])
+
+    assert _status(report, "CALC.ARITHMETIC") is (RunStatus.PASS if passes else RunStatus.FAIL)
+
+
+def test_a_claim_about_the_only_matching_row_can_rest_on_a_selection() -> None:
+    selection = _selection([5], values=[92, 60, 99]).model_copy(update={"id": "calc_2"})
+    claim = {
+        "id": "claim_1",
+        "statement": "Only row 5 holds the maximum.",
+        "value": 5,
+        "citations": ["People!G3:G5"],
+        "computation_id": "calc_2",
+    }
+    candidate = CandidateAnswer.model_validate({"answer_text": "Row 5.", "claims": [claim]})
+
+    report = _answer_report(candidate, computations={"calc_2": selection})
+
+    assert _status(report, "ANSWER.PROVENANCE") is RunStatus.PASS
+    assert _status(report, "CALC.ARITHMETIC") is RunStatus.PASS
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        'Here it is: {"status": "PASS"} and a note {not json}',
+        'Code first `{x}` then {"status": "PASS"}',
+        '```json\n{"status": "PASS"}\n```',
+    ],
+)
+def test_the_first_decodable_json_object_is_extracted(raw: str) -> None:
+    from autotab.qa.layers.verification import extract_json_object
+
+    assert json.loads(extract_json_object(raw)) == {"status": "PASS"}
+
+
+def test_text_orders_as_text_in_a_row_selection() -> None:
+    # Dates read through wb.range arrive as ISO text; ordering them must still work.
+    dates = ["2021-03-14 00:00:00", "2025-10-21 00:00:00", "2024-02-08 00:00:00"]
+    record = _selection([4, 5], op="gt", value="2024-01-01", values=dates)
+
+    report = run_action_checks(ResultState.SUCCESS, [record])
+
+    assert _status(report, "CALC.ARITHMETIC") is RunStatus.PASS
