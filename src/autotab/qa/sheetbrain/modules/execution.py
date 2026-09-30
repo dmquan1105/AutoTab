@@ -5,14 +5,14 @@
 
 import re
 import time
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from openai import RateLimitError
 from openai.types.chat import ChatCompletionMessage
 
+from ..utils.logger import setup_logger
 from .response_parser import parse_model_response
 from .safe_execution import SafeInterpreter
-from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -53,12 +53,12 @@ HELPER_CALL_LIMITS = {
 
 class ExecutionModule:
     """
-    Module responsible for multi-turn reasoning and code execution based on understanding context.
+    Module responsible for multi-turn reasoning and code execution.
     Handles its own conversation flow internally and returns the final result.
     """
 
     def __init__(self, client, deployment: str, code_globals: dict, code_locals: dict,
-                 excel_context_execution: str, extra_body: Optional[dict[str, Any]] = None):
+                 extra_body: Optional[dict[str, Any]] = None):
         """
         Initialize the ExecutionModule.
 
@@ -67,13 +67,11 @@ class ExecutionModule:
             deployment: Model deployment name
             code_globals: Global variables for code execution
             code_locals: Local variables for code execution
-            excel_context_execution: Excel context for execution
         """
         self.client = client
         self.deployment = deployment
         self.code_globals = code_globals
         self.code_locals = code_locals
-        self.excel_context_execution = excel_context_execution
         self.extra_body = extra_body or {}
         self.conversation_history: list[Any] = []
         approved_helpers = {
@@ -155,26 +153,8 @@ CRITICAL REQUIREMENTS:
 - NO preamble, postamble, or "how it works" sections
 - VIOLATION WILL RESULT IN TASK FAILURE
 
-**CRITICAL DECISION FRAMEWORK - When to use Code vs. Direct Analysis:**
-
-** USE DIRECT ANALYSIS (Give Final Answer immediately) when:**
-- The Sheet Content preview shows ALL necessary data for the question
-- Simple calculations can be performed mentally from visible data
-- The question asks for values that are directly visible in the preview
-- Table structure is clear and hierarchical relationships are evident
-- No complex aggregations, transformations, or editing operations are needed
-- Data relationships (parent-child, subtotals) are obvious from the preview
-
-** USE CODE when:**
-- Data extends beyond what's shown in the preview
-- Complex calculations, aggregations, or statistical analysis is required
-- Data transformation, filtering, or manipulation is needed
-- Need to edit/modify the Excel file
-- Need to search across large datasets
-- Verification of calculations through code is specifically requested
-
 **IMPORTANT GUIDELINES:**
-- **NO REDUNDANT CODE**: Don't write code to print data that's already visible in the Sheet Content
+- Inspect the workbook with the available helpers before answering data-dependent questions
 - Print intermediate results to show your thought process
 - Use the helper functions for common operations
 - **Identify hierarchical relationships** (e.g., "of which", "including", indented items)
@@ -205,16 +185,10 @@ Start by exploring the data structure to understand what you're working with."""
 
         return {"role": "system", "content": system_content}
 
-    def _create_initial_user_prompt(self, understanding_output: str, user_question: str) -> dict:
+    def _create_initial_user_prompt(self, user_question: str) -> dict:
         """Create the initial user prompt for the conversation."""
 
-        user_content = f"""**Sheet Content:**
-{self.excel_context_execution}
-
-**Understanding Context:**
-{understanding_output}
-
-**USER QUESTION:**
+        user_content = f"""**USER QUESTION:**
 {user_question}
 
 Please start by exploring the data structure and then work toward answering the question step by step.
@@ -222,12 +196,11 @@ Please start by exploring the data structure and then work toward answering the 
 
         return {"role": "user", "content": user_content}
 
-    def run(self, understanding_output: str, user_question: str, max_turns: int = 20) -> Dict[str, Any]:
+    def run(self, user_question: str, max_turns: int = 20) -> Dict[str, Any]:
         """
-        Run the execution module with understanding context and user question.
+        Run the execution module with the user question.
 
         Args:
-            understanding_output: Output from UnderstandingModule
             user_question: Original user question
             max_turns: Maximum number of conversation turns
 
@@ -239,7 +212,7 @@ Please start by exploring the data structure and then work toward answering the 
 
         # Initialize conversation with system prompt and initial user prompt
         self.conversation_history = [self._get_system_prompt()]
-        initial_prompt = self._create_initial_user_prompt(understanding_output, user_question)
+        initial_prompt = self._create_initial_user_prompt(user_question)
         self.conversation_history.append(initial_prompt)
 
         execution_steps = []  # Track key execution steps

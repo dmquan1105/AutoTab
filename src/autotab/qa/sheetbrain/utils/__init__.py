@@ -3,7 +3,7 @@
 
 """Utility modules for SheetBrain."""
 
-from .excel_toolkit import ExcelToolkit, calculate_token_cost_line
+from .excel_toolkit import ExcelToolkit
 from .logger import setup_logger
 
-__all__ = ["ExcelToolkit", "calculate_token_cost_line", "setup_logger"]
+__all__ = ["ExcelToolkit", "setup_logger"]

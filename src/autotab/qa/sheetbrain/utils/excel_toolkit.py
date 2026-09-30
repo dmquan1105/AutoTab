@@ -17,7 +17,6 @@ from openpyxl.chart import BarChart, LineChart, PieChart, ScatterChart, AreaChar
 from openpyxl.chart.reference import Reference
 from openpyxl.drawing.image import Image
 from PIL import Image as PILImage
-import tiktoken
 
 from .excel_security import sanitize_cell_value, validate_formula
 
@@ -26,43 +25,6 @@ MAX_RANGE_CELLS = 100000
 MAX_MUTATION_COUNT = 10000
 MAX_WORKSHEET_ROWS = 1048576
 MAX_WORKSHEET_COLUMNS = 16384
-
-def calculate_token_cost_line(text: str, model: str = "gpt-4") -> int:
-    """
-    Calculate the actual token cost of a string using tiktoken.
-
-    Args:
-        text: Input text to analyze
-        model: Model name for tokenization
-
-    Returns:
-        Actual token count
-    """
-    try:
-        # Map model names to tiktoken encodings
-        model_encodings = {
-            "gpt-4": "cl100k_base",
-            "gpt-4-turbo": "cl100k_base",
-            "gpt-4o": "o200k_base",
-            "gpt-3.5-turbo": "cl100k_base",
-            "gpt-5-nano-2025-08-07": "o200k_base", 
-            "text-embedding-ada-002": "cl100k_base",
-        }
-
-        # Get the appropriate encoding
-        encoding_name = model_encodings.get(model, "cl100k_base")  # Default to cl100k_base
-        encoding = tiktoken.get_encoding(encoding_name)
-
-        # Encode and count tokens
-        tokens = encoding.encode(text)
-        return len(tokens)
-    
-    except Exception:
-        # Fallback on any error
-        char_count = len(text)
-        token_count = max(1, int(char_count / 3.5))
-        return token_count
-
 
 class ExcelToolkit:
     """A comprehensive toolkit for Excel operations with openpyxl."""

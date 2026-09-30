@@ -1,31 +1,25 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Core SheetBrain agent with three-stage architecture."""
+"""Core SheetBrain agent with iterative execution and validation."""
 
 import os
 import time
 import zipfile
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
-from PIL import Image
 from openai import OpenAI
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
+from PIL import Image
 
 from ..config.settings import Config
 from ..modules.execution import ExecutionModule
 from ..modules.validation import ValidationModule
-from ..utils.excel_toolkit import ExcelToolkit, calculate_token_cost_line
+from ..utils.excel_toolkit import ExcelToolkit
 from ..utils.logger import setup_logger
 
 logger = setup_logger(__name__)
 
-MAX_PREVIEW_CELLS = 50000
-MAX_PREVIEW_ROWS = 1000
-MAX_PREVIEW_COLUMNS = 100
-MAX_PREVIEW_VALUE_LENGTH = 1000
 MAX_WORKBOOK_FILE_SIZE = 100 * 1024 * 1024
 MAX_WORKBOOK_UNCOMPRESSED_SIZE = 500 * 1024 * 1024
 MAX_WORKBOOK_ARCHIVE_MEMBERS = 10000
@@ -34,7 +28,7 @@ MAX_WORKBOOK_COMPRESSION_RATIO = 100
 
 class SheetBrain:
     """
-    Excel analysis agent with three-stage architecture: Understand-Execute-Validate.
+    Excel analysis agent with iterative execution and validation.
     Supports iterative improvement through validation feedback.
     """
 
@@ -62,28 +56,16 @@ class SheetBrain:
             'requires_reexecution': validation_result.get('requires_reexecution', False),
         }
 
-    def __init__(self, excel_path: str, config: Optional[Config] = None,
-                 total_token_budget: int = 10000,
-                 load_excel: bool = True, excel_context_understanding: Optional[str] = None,
-                 excel_context_execution: Optional[str] = None,
-                 exploration_path: Optional[str] = None):
+    def __init__(self, excel_path: str, config: Optional[Config] = None):
         """
         Initialize the SheetBrain agent.
 
         Args:
             excel_path: Path to the Excel file
             config: Configuration object (if None, uses default config)
-            total_token_budget: Token budget for initial context generation
-            load_excel: Whether to load Excel file and openpyxl libraries
-            excel_context_understanding: Pre-generated understanding context (optional)
-            excel_context_execution: Pre-generated execution context (optional)
-            exploration_path: AutoTab exploration Markdown used as understanding output
         """
         self.excel_path = excel_path
         self.config = config or Config()
-        self.total_token_budget = total_token_budget
-        self.load_excel = load_excel
-        self.exploration_path = Path(exploration_path) if exploration_path else None
 
         # Initialize OpenAI client
         self.client = OpenAI(
@@ -96,41 +78,19 @@ class SheetBrain:
         self.code_globals = {}
         self.code_locals = {}
 
-        # Setup Excel environment
-        if self.load_excel:
-            self._setup_excel_libraries()
+        self._setup_excel_libraries()
 
-            try:
-                if excel_context_understanding is None:
-                    self.excel_context_understanding = self._generate_sheets_markdown_summary(total_token_budget * 2)
-                else:
-                    self.excel_context_understanding = excel_context_understanding
-
-                if excel_context_execution is None:
-                    self.excel_context_execution = self._generate_sheets_markdown_summary(total_token_budget)
-                else:
-                    self.excel_context_execution = excel_context_execution
-            finally:
-                self.preview_workbook.close()
-        else:
-            self.workbook = None
-            self.preview_workbook = None
-            self.excel_context_understanding = excel_context_understanding or "Excel file not loaded. Working with provided context only."
-            self.excel_context_execution = excel_context_execution or "Excel file not loaded. Working with provided context only."
-
-        # Initialize SheetBrain execution and validation unchanged.
         self.execution_module = ExecutionModule(
             self.client, self.config.deployment, self.code_globals, self.code_locals,
-            self.excel_context_execution, self.config.extra_body,
+            self.config.extra_body,
         )
         self.validation_module = ValidationModule(
-            self.client, self.config.deployment, self.excel_context_understanding,
-            self.config.extra_body,
+            self.client, self.config.deployment, self.config.extra_body,
         )
 
     def run(self, user_question: str, table_image: Optional[Image.Image] = None,
-            max_turns: Optional[int] = None, enable_validation: Optional[bool] = None,
-            enable_understanding: Optional[bool] = None) -> Dict[str, Any]:
+            max_turns: Optional[int] = None,
+            enable_validation: Optional[bool] = None) -> Dict[str, Any]:
         """
         Run the complete analysis with iterative improvement through validation.
 
@@ -139,7 +99,6 @@ class SheetBrain:
             table_image: Optional screenshot of relevant Excel sheet area
             max_turns: Maximum number of Execute-Validate iterations
             enable_validation: Whether to run the validation stage
-            enable_understanding: Whether to run the understanding stage
 
         Returns:
             Dictionary containing complete analysis results
@@ -147,10 +106,9 @@ class SheetBrain:
         # Use config defaults if not specified
         max_turns = max_turns or self.config.max_turns
         enable_validation = enable_validation if enable_validation is not None else self.config.enable_validation
-        enable_understanding = enable_understanding if enable_understanding is not None else self.config.enable_understanding
 
-        logger.info("Starting iterative three-stage analysis")
-        print("🚀 [SheetBrain] Starting iterative three-stage analysis...")
+        logger.info("Starting iterative execution and validation")
+        print("🚀 [SheetBrain] Starting iterative execution and validation...")
         print("="*80)
 
         overall_start_time = time.time()
@@ -158,20 +116,6 @@ class SheetBrain:
         all_validation_results = []
 
         try:
-            # ===== STAGE 1: AUTOTAB EXPLORATION =====
-            logger.info("Loading AutoTab exploration output")
-            print("📖 [STAGE 1] AUTOTAB EXPLORATION")
-            print("-" * 40)
-            understanding_start_time = time.time()
-            if self.exploration_path is None:
-                raise ValueError("An AutoTab exploration path is required")
-            understanding_output = self.exploration_path.read_text(encoding="utf-8")
-            if not understanding_output.strip():
-                raise ValueError("AutoTab exploration output is empty")
-            understanding_duration = time.time() - understanding_start_time
-            print(f"✅ [STAGE 1] Exploration loaded in {understanding_duration:.2f}s")
-            print("📝 [STAGE 1] Analysis completed")
-
             # ===== ITERATIVE EXECUTE-VALIDATE LOOP =====
             for iteration in range(max_turns):
                 logger.info(f"Starting iteration {iteration + 1}/{max_turns}")
@@ -183,25 +127,7 @@ class SheetBrain:
                 print("-" * 40)
                 execution_start_time = time.time()
 
-                # Add improvement feedback from previous validation if available
-                if iteration > 0 and all_validation_results:
-                    last_validation = all_validation_results[-1]
-                    if last_validation.get('improvement_feedback'):
-                        enhanced_understanding = f"""{understanding_output}
-
-**IMPROVEMENT FEEDBACK FROM PREVIOUS ITERATION:**
-{last_validation['improvement_feedback']}
-
-**ISSUES TO ADDRESS:**
-{'; '.join(last_validation.get('issues_found', []))}
-
-Please address these specific points in your new analysis approach."""
-                    else:
-                        enhanced_understanding = understanding_output
-                else:
-                    enhanced_understanding = understanding_output
-
-                execution_result = self.execution_module.run(enhanced_understanding, user_question)
+                execution_result = self.execution_module.run(user_question)
                 execution_duration = time.time() - execution_start_time
                 all_execution_results.append(execution_result)
 
@@ -217,7 +143,7 @@ Please address these specific points in your new analysis approach."""
                     print("-" * 40)
                     validation_start_time = time.time()
 
-                    validation_result = self.validation_module.reflect(execution_result, user_question, understanding_output)
+                    validation_result = self.validation_module.reflect(execution_result, user_question)
                     validation_duration = time.time() - validation_start_time
                     all_validation_results.append(validation_result)
 
@@ -271,7 +197,7 @@ Please address these specific points in your new analysis approach."""
                 issues_found = []
                 improvement_feedback = ''
 
-            # Detailed prompts and workbook-derived context are opt-in diagnostics.
+            # Detailed prompts are opt-in diagnostics.
             all_conversation_histories = []
             if self.config.include_diagnostics:
                 for iteration_index, exec_result in enumerate(all_execution_results, 1):
@@ -326,8 +252,7 @@ Please address these specific points in your new analysis approach."""
                 "issues_found": public_issues_found,
                 "improvement_feedback": public_improvement_feedback,
                 "total_duration": total_duration,
-                "user_question": user_question if self.config.include_diagnostics else "",
-                "understanding_output": understanding_output if self.config.include_diagnostics else ""
+                "user_question": user_question if self.config.include_diagnostics else ""
             }
 
         except Exception as e:
@@ -374,155 +299,12 @@ Please address these specific points in your new analysis approach."""
                 "user_question": user_question if self.config.include_diagnostics else ""
             }
 
-    def _generate_sheets_markdown_summary(self, total_token_budget: int = 50000) -> str:
-        """Generate a markdown summary of all sheets in the workbook."""
-        try:
-            workbook = self.preview_workbook
-            overview_parts = []
-
-            overview_parts.append(f"📊 **Excel File Overview: {os.path.basename(self.excel_path)}**\n")
-            overview_parts.append(f"**Total Sheets:** {len(workbook.sheetnames)}\n")
-
-            # Token budget management
-            available_tokens = total_token_budget
-
-            # Distribute tokens among sheets
-            tokens_per_sheet = available_tokens // len(workbook.sheetnames) if workbook.sheetnames else 0
-            remaining_preview_cells = MAX_PREVIEW_CELLS
-
-            for sheet_name in workbook.sheetnames:
-                sheet = workbook[sheet_name]
-                sheet_parts = []
-
-                sheet_parts.append(f"\n**📄 Sheet: '{sheet_name}'**")
-                sheet_parts.append(f"- Dimensions: {sheet.max_row} rows × {sheet.max_column} columns")
-
-                if tokens_per_sheet > 0 and remaining_preview_cells > 0:
-                    # Get comprehensive preview with token limit
-                    preview_result = self._get_sheet_preview_with_token_limit(
-                        sheet,
-                        tokens_per_sheet,
-                        max_rows=min(sheet.max_row, MAX_PREVIEW_ROWS),
-                        max_cols=min(sheet.max_column, MAX_PREVIEW_COLUMNS),
-                        max_cells=remaining_preview_cells,
-                    )
-                    remaining_preview_cells -= preview_result['cells_scanned']
-
-                    sheet_parts.append(f"- Data Preview ({preview_result['rows_shown']} of {sheet.max_row} rows, "
-                                    f"{preview_result['cols_shown']} of {sheet.max_column} columns):")
-
-                    if preview_result['is_truncated']:
-                        sheet_parts.append("  ⚠️ Preview truncated to fit token budget")
-
-                    # Add data preview in markdown table format with A1 notation
-                    sheet_parts.append("  Data:")
-                    markdown_rows = []
-                    for row_data in preview_result['formatted_data']:
-                        markdown_rows.append(f"| {' | '.join(row_data)} |")
-
-                    # Join all rows with newline and backslash-n for compact representation
-                    if markdown_rows:
-                        sheet_parts.append("  " + "\\n".join(markdown_rows))
-
-                    # Add data summary if we couldn't show all rows
-                    if preview_result['rows_shown'] < sheet.max_row:
-                        sheet_parts.append(f"\n  📊 Sheet Summary:")
-                        sheet_parts.append(f"  - Total rows: {sheet.max_row}")
-                        sheet_parts.append(f"  - Total columns: {sheet.max_column}")
-                        sheet_parts.append(f"  - Rows shown in preview: {preview_result['rows_shown']}")
-
-                overview_parts.extend(sheet_parts)
-
-            final_overview = "\n".join(overview_parts)
-            return final_overview
-
-        except Exception as e:
-            logger.error(f"Error generating Excel overview: {str(e)}")
-            return f"❌ Error generating Excel overview: {str(e)}"
-
-    def _get_sheet_preview_with_token_limit(self, sheet, token_budget: int,
-                                          max_rows: int = MAX_PREVIEW_ROWS,
-                                          max_cols: int = MAX_PREVIEW_COLUMNS,
-                                          max_cells: int = MAX_PREVIEW_CELLS) -> Dict[str, Any]:
-        """Get a preview of sheet data that fits within a token budget."""
-        preview_data = []
-        formatted_data = []
-        tokens_used = 0
-        rows_shown = 0
-
-        start_row = 1
-
-        # Calculate effective limits
-        max_data_cols = min(max_cols, sheet.max_column, max_cells)
-        max_data_rows = min(max_rows, sheet.max_row, max_cells // max(max_data_cols, 1))
-
-        # Iterate through rows and accumulate data within token budget
-        for row_idx in range(start_row, max_data_rows + 1):
-            row_cells = []
-            formatted_row_cells = []
-
-            # Get actual row data
-            for col_idx in range(1, max_data_cols + 1):
-                cell_ref = f"{get_column_letter(col_idx)}{row_idx}"
-                cell = sheet[cell_ref]
-                cell_value = cell.value
-
-                # Format cell value for display
-                display_value = str(cell_value) if cell_value is not None else ""
-                display_value = display_value[:MAX_PREVIEW_VALUE_LENGTH]
-
-                # Escape markdown special characters
-                display_value = display_value.replace("|", "\\|").replace("\n", " ").replace("\r", " ")
-
-                # Simple format: A1:value
-                formatted_cell = f"{cell_ref}:{display_value}"
-
-                row_cells.append(cell_value)
-                formatted_row_cells.append(formatted_cell)
-
-            # Convert formatted row to string to estimate tokens
-            row_str = " | ".join(formatted_row_cells)
-            row_tokens = calculate_token_cost_line(row_str)
-
-            # Check if adding this row would exceed budget
-            if tokens_used + row_tokens > token_budget:
-                # Try to add at least some rows even if over budget for minimal data
-                if rows_shown < 5:  # Ensure we show at least 5 rows if possible
-                    preview_data.append(row_cells)
-                    formatted_data.append(formatted_row_cells)
-                    rows_shown += 1
-                    tokens_used += row_tokens
-                break
-
-            preview_data.append(row_cells)
-            formatted_data.append(formatted_row_cells)
-            rows_shown += 1
-            tokens_used += row_tokens
-
-        return {
-            'data': preview_data,
-            'formatted_data': formatted_data,
-            'rows_shown': rows_shown,
-            'cols_shown': max_data_cols,
-            'start_row': start_row,
-            'is_truncated': rows_shown < max_data_rows,
-            'tokens_used': tokens_used,
-            'cells_scanned': rows_shown * max_data_cols,
-        }
-
     def _setup_excel_libraries(self):
         """Setup Excel-related libraries and utilities."""
         try:
             self._validate_workbook_archive(self.excel_path)
             logger.info("Loading Excel file")
             start_time = time.time()
-            self.preview_workbook = load_workbook(
-                self.excel_path,
-                data_only=True,
-                read_only=True,
-                keep_links=False,
-                keep_vba=False,
-            )
             workbook = load_workbook(
                 self.excel_path,
                 data_only=False,

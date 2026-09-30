@@ -5,7 +5,7 @@
 
 import re
 import time
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from ..utils.logger import setup_logger
 
@@ -18,7 +18,7 @@ class ValidationModule:
     If issues are found, provides feedback for re-execution. If validation passes, confirms the final answer.
     """
 
-    def __init__(self, client, deployment: str, excel_context_understanding: str,
+    def __init__(self, client, deployment: str,
                  extra_body: Optional[dict[str, Any]] = None):
         """
         Initialize the ValidationModule.
@@ -26,21 +26,18 @@ class ValidationModule:
         Args:
             client: OpenAI client instance
             deployment: Model deployment name
-            excel_context_understanding: Excel context for understanding
         """
         self.client = client
         self.deployment = deployment
-        self.excel_context_understanding = excel_context_understanding
         self.extra_body = extra_body or {}
 
-    def reflect(self, execution_result: Dict[str, Any], user_question: str, understanding_output: str) -> Dict[str, Any]:
+    def reflect(self, execution_result: Dict[str, Any], user_question: str) -> Dict[str, Any]:
         """
         Reflect on and validate the execution results.
 
         Args:
             execution_result: Complete result from ExecutionModule
             user_question: Original user question
-            understanding_output: Output from UnderstandingModule
 
         Returns:
             Dictionary containing validation results and feedback
@@ -51,7 +48,6 @@ class ValidationModule:
         messages = self._create_validation_prompt(
             execution_result,
             user_question,
-            understanding_output
         )
 
         # Get validation analysis
@@ -86,7 +82,9 @@ class ValidationModule:
                 "requires_reexecution": False  # Don't retry if validation itself failed
             }
 
-    def _create_validation_prompt(self, execution_result: Dict[str, Any], user_question: str, understanding_output: str) -> list:
+    def _create_validation_prompt(
+        self, execution_result: Dict[str, Any], user_question: str
+    ) -> list:
         """Create a comprehensive validation prompt for the LLM."""
 
         # Extract key information from execution result
@@ -104,10 +102,6 @@ class ValidationModule:
 **ORIGINAL USER QUESTION:**
 {user_question}
 **ORIGINAL USER QUESTION END:**
-
-**EXCEL DATA CONTEXT:**
-{self.excel_context_understanding}
-**EXCEL DATA CONTEXT END:**
 
 **EXECUTION RESULTS:**
 - Success: {execution_success}
